@@ -2,7 +2,7 @@
 
 ## Intent
 
-Validate that a Micro Agent Sandbox task manifest declares the minimum fields needed for a bounded autonomous run.
+Validate that a Single File Micro Agent task manifest declares the minimum fields needed for a bounded autonomous run.
 
 ## Inputs
 

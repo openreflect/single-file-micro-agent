@@ -1,8 +1,8 @@
-# Micro Agent Sandbox PRD
+# Single File Micro Agent PRD
 
 ## Summary
 
-Micro Agent Sandbox is a small public framework for bounded autonomous worker runs. It starts with task manifests and deterministic validation before adding model adapters and execution loops.
+Single File Micro Agent is a small public framework for bounded autonomous worker runs. It starts with task manifests and deterministic validation before adding model adapters and execution loops.
 
 ## Problem
 

@@ -1,6 +1,6 @@
-# Micro Agent Sandbox
+# Single File Micro Agent
 
-Micro Agent Sandbox is a tiny, API-agnostic framework for running disposable autonomous agents in tightly bounded workspaces. It is designed for simple tasks where a full agent platform would add more surface area than the task needs.
+Single File Micro Agent is a tiny, API-agnostic framework for running disposable autonomous agents in tightly bounded workspaces. It is designed for simple tasks where a full agent platform would add more surface area than the task needs.
 
 The core idea is to keep the harness small enough to inspect, restrict what the agent can touch, and make every run produce a durable result record.
 
@@ -16,7 +16,7 @@ This project captures the reusable public pattern for a minimal sandboxed agent 
 task manifest
      |
      v
-micro agent runner
+single-file micro-agent runner
      |
      +--> bounded workspace
      +--> model/API adapter
@@ -26,7 +26,7 @@ micro agent runner
 
 The runner should be boring by design: small manifests, clear permissions, synthetic fixtures, and explicit outputs.
 
-## What Micro Agent Sandbox manages
+## What Single File Micro Agent manages
 
 - Task manifests.
 - Workspace boundaries.
@@ -74,6 +74,6 @@ python3 scripts/validate_task.py examples/task-manifest.example.json
 Use this repository as the generic upstream. Keep private model keys, local runtime paths, live task logs, and environment-specific command policies in private downstream repositories or private branches.
 
 ```text
-ORG/micro-agent-sandbox public generic framework
-private downstream fork local adapters, credentials, task logs
+ORG/single-file-micro-agent public generic framework
+private downstream fork      local adapters, credentials, task logs
 ```

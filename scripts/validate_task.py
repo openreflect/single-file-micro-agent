@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a public-safe Micro Agent Sandbox task manifest."""
+"""Validate a public-safe Single File Micro Agent task manifest."""
 
 from __future__ import annotations
 
