@@ -1,0 +1,10 @@
+{
+  "name": "summarize-fixture",
+  "workspace": "examples/workspaces/summarize-fixture",
+  "modelAdapter": "example-adapter",
+  "allowedCommands": ["python3"],
+  "inputs": ["input.txt"],
+  "outputs": ["result.json"],
+  "maxTurns": 3,
+  "dryRunDefault": true
+}
