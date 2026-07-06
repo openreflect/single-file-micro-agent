@@ -31,10 +31,11 @@ Full agent systems are useful, but they can be too heavy for small repeatable ta
 - Manifest validator.
 - Synthetic task fixture.
 - Public/private repository guidance.
+- M0 containment-floor runner (agent.mjs): single loop, manifest enforcement, dry-run, trace and result record, offline mock-provider test harness.
 
 ## Future scope
 
-- Single-file runner.
+- Single-file runner — M0 floor shipped; M1 adds multi-loop bootstrap and the epsilon soft tier.
 - Asynchronous multi-loop flywheel core, governed by a two-tier epsilon judge (SPEC §5).
 - Configuration lifecycle: probation, statistical certification from traces, pinning (SPEC §5.6).
 - Endpoint weight grid: self-tuned weighted access across a minimum of 3 LLM API endpoints (SPEC §5.7).
