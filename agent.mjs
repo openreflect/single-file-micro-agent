@@ -114,7 +114,7 @@ function checkCmd(cmd, allowed) {
 // clientIdEnv, clientSecretEnv, scope?}) switches the endpoint to OAuth2 —
 // tokens are fetched, cached, and refreshed 60s before expiry. Secrets stay
 // in env (SPEC §10); the manifest names variables, never values.
-const KEYS = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
+const KEYS = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY", codex: "OPENAI_CODEX_TOKEN" };
 const tokenCache = {};
 async function authHeaders(ep) {
   const a = ep.auth;
@@ -145,6 +145,25 @@ const providers = {
     const keyParam = ep.auth ? "" : `?key=${process.env[KEYS.gemini]}`;
     const r = await post(`${ep.baseUrl || "https://generativelanguage.googleapis.com"}/v1beta/models/${ep.model}:generateContent${keyParam}`, ep.auth ? auth : {}, { system_instruction: { parts: [{ text: sys }] }, contents: msgs.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })) });
     return r.candidates[0].content.parts[0].text;
+  },
+  // ChatGPT-plan OAuth via the Codex backend (Responses API over SSE). Tokens
+  // are provisioned OUTSIDE the file by scripts/codex_env.mjs (or OpenClaw /
+  // `codex login`); the agent only consumes env. Unofficial surface — expect
+  // drift; failures fail over like any endpoint.
+  codex: async (ep, auth, sys, msgs) => {
+    const res = await fetch(`${ep.baseUrl || "https://chatgpt.com/backend-api/codex"}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream", ...auth, "chatgpt-account-id": process.env.OPENAI_CODEX_ACCOUNT ?? "", "OpenAI-Beta": "responses=experimental", originator: "codex_cli_rs", session_id: crypto.randomUUID() },
+      body: JSON.stringify({ model: ep.model, instructions: sys, input: msgs.map((m) => ({ type: "message", role: m.role, content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: m.content }] })), store: false, stream: true }),
+      signal: AbortSignal.timeout(120000),
+    });
+    if (!res.ok) throw new Error(`codex HTTP ${res.status}: ${clip(await res.text(), 300)}`);
+    const events = (await res.text()).split("\n").filter((l) => l.startsWith("data: ")).flatMap((l) => { try { return [JSON.parse(l.slice(6))]; } catch { return []; } });
+    const deltas = events.filter((e) => e.type === "response.output_text.delta").map((e) => e.delta).join("");
+    if (deltas) return deltas;
+    const texts = (events.find((e) => e.type === "response.completed")?.response?.output || []).flatMap((o) => (o.content || []).filter((c) => c.type === "output_text").map((c) => c.text));
+    if (!texts.length) throw new Error("codex: no output_text in stream");
+    return texts.join("");
   },
   mock: async (ep, auth, sys, msgs, state) => {
     if (!state.mockQ) state.mockQ = process.env.SFMA_MOCK ? JSON.parse(process.env.SFMA_MOCK) : defaultMock(state.manifest);

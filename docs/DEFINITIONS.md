@@ -73,10 +73,28 @@ machine OAuth:
 Tokens are fetched, cached per endpoint, and refreshed 60s before expiry; a
 token failure counts as an endpoint transport failure (failover applies). The
 manifest names env variables, never secret values (SPEC §10). Interactive
-OAuth flows (browser sign-in) are deliberately unsupported: an autonomous run
-cannot block on a human. The example above pairs with
+OAuth flows (browser sign-in) are deliberately unsupported *inside the file*:
+an autonomous run cannot block on a human. The example above pairs with
 `baseUrl: "https://<resource>.openai.azure.com/openai"` for Azure OpenAI's
 v1-compatible route; any OAuth2-fronted gateway works the same way.
+
+**ChatGPT-plan OAuth (`provider: "codex"`).** Rides an existing ChatGPT
+subscription login (as provisioned by `codex login` or OpenClaw) instead of a
+platform API key. The credential helper
+[scripts/codex_env.mjs](../scripts/codex_env.mjs) reads `~/.codex/auth.json`,
+refreshes the access token when near expiry, and hands the agent
+`OPENAI_CODEX_TOKEN` / `OPENAI_CODEX_ACCOUNT`:
+
+```bash
+node scripts/codex_env.mjs -- node agent.mjs manifest.json --apply
+```
+
+The endpoint entry is just `{"name": "openai-codex", "provider": "codex",
+"model": "gpt-5.5"}`. Caveat, stated plainly: this backend
+(`chatgpt.com/backend-api/codex`, Responses API over SSE) is an unofficial
+surface tied to the account's plan — it can change without notice, so treat
+it as one endpoint in the grid, never the only one, for anything that must be
+stable.
 
 ### 3.2 Measured state (EWMA, α = `tuning.ewmaAlpha`, default **0.3**)
 

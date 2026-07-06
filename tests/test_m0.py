@@ -198,6 +198,53 @@ class M0Test(unittest.TestCase):
         finally:
             server.shutdown()
 
+    def test_codex_oauth_sse_adapter(self):
+        served = {"calls": 0, "headers": []}
+        replies = [json.dumps(CANDIDATE),
+                   json.dumps({"tool": "write", "path": "result.json", "content": "codex-ok"}),
+                   json.dumps({"tool": "done", "summary": "ok"})]
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("content-length", 0)))
+                served["headers"].append({k.lower(): v for k, v in self.headers.items()})
+                text = replies[min(served["calls"], 2)]
+                served["calls"] += 1
+                mid = len(text) // 2
+                sse = "".join(
+                    f"data: {json.dumps(ev)}\n\n" for ev in [
+                        {"type": "response.output_text.delta", "delta": text[:mid]},
+                        {"type": "response.output_text.delta", "delta": text[mid:]},
+                        {"type": "response.completed", "response": {"output": []}},
+                    ])
+                self.send_response(200)
+                self.send_header("content-type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(sse.encode())
+
+            def log_message(self, *a):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            manifest = self.manifest(modelEndpoints=[{
+                "name": "codex", "provider": "codex", "model": "gpt-5.5",
+                "baseUrl": f"http://127.0.0.1:{server.server_port}",
+            }])
+            env = {**os.environ, "OPENAI_CODEX_TOKEN": "codex-tok", "OPENAI_CODEX_ACCOUNT": "acct-42"}
+            r = subprocess.run(RUNNER + [str(manifest), "--apply"],
+                               capture_output=True, text=True, env=env, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual((self.ws / "result.json").read_text(), "codex-ok")
+            self.assertEqual(served["calls"], 3)
+            h = served["headers"][0]
+            self.assertEqual(h.get("authorization"), "Bearer codex-tok")
+            self.assertEqual(h.get("chatgpt-account-id"), "acct-42")
+            self.assertEqual(h.get("openai-beta"), "responses=experimental")
+        finally:
+            server.shutdown()
+
     def test_trace_is_ordered_and_anchored(self):
         script = [CANDIDATE, {"tool": "done", "summary": "minimal"}]
         self.run_agent(self.manifest(outputs=[]), script)
