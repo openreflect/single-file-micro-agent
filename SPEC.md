@@ -159,11 +159,17 @@ but cannot make it *escape* the containment contract.
 
 ### 5.4 Bootstrap and emergent configuration
 
+- Loops are instantiated from the **genesis prompt**
+  ([prompts/genesis.prompt.md](prompts/genesis.prompt.md)) — the one fixed,
+  versioned prompt baked into the file, sitting below the containment floor
+  and auditable in this repo. All loops receive it identically; candidate
+  diversity comes from sampling, not differentiated instructions.
 - At startup the coordination unit is the **bootstrap prompt**. Loops
-  independently draft candidates; epsilon judges them (hard tier: consistency
-  with the manifest; soft tier: coherence and fitness for the task), and the
-  surviving candidate becomes the agent's operating configuration — including
-  its system prompt.
+  independently draft candidates per the genesis prompt's contract; epsilon
+  judges them (hard tier: consistency with the manifest; soft tier: coherence
+  and fitness for the task), and the surviving candidate becomes the agent's
+  operating configuration — including its system prompt and the
+  `successCriteria` that drive probation (§5.6).
 - The configuration is therefore **emergent**, and startup behavior is
   high-variance and not reproducible run to run. The emergent configuration
   MUST be captured into the result record (§8), so a run is *explainable after
@@ -210,8 +216,15 @@ statistically.
 
 ### 5.7 Model access — the endpoint weight grid
 
-- The agent holds access to a **minimum of 3 LLM API endpoints**, mirroring the
-  loop floor: enough to tolerate one slow, failed, or degraded provider.
+- The agent targets **3 LLM API endpoints** (reference set: Anthropic, OpenAI,
+  Gemini), mirroring the loop floor: enough to tolerate one slow, failed, or
+  degraded provider. **One endpoint is a supported degenerate mode** — the grid
+  collapses to health-gating (down detection, backoff, retry) and routing is
+  bypassed.
+- Routing is **reasoning-based, not just HA**: every model call carries a task
+  class (`reasoning` or `mechanical`), and each endpoint is scored per class —
+  so a call needing judgment can route differently than a call needing speed.
+  Failover falls through score order.
 - Access is allocated by **self-determined weights** in an **evaluation grid
   that tunes continually as part of the flywheel**: loops vote weight
   adjustments as ordinary flywheel work, and epsilon judges those adjustments
@@ -224,6 +237,9 @@ statistically.
   recorded traces by code, so the grid is auditable and cannot be argued with.
   This same process supplies the stability statistics for configuration
   certification (§5.6).
+- Formulas, defaults, and every tunable knob are defined in
+  [docs/DEFINITIONS.md](docs/DEFINITIONS.md); defaults are the chosen first-run
+  values and the manifest's `tuning` block overrides them.
 
 ## 6. Memory — tiered, type-agnostic, self-profiling
 
@@ -295,11 +311,16 @@ Each run is governed by a **task manifest** declaring, at minimum (see
 |-------|---------|
 | `name` | Task identifier |
 | `workspace` | The single bounded workspace the run may touch |
-| `modelAdapter` | Swappable model/API adapter (provider-agnostic) |
+| `modelEndpoints` | 1..n provider-agnostic endpoints for the weight grid (§5.7); 3 is the target |
 | `allowedCommands` | Explicit command allowlist — the only commands the run may execute |
 | `inputs` / `outputs` | Declared input and output files |
 | `maxTurns` | Upper bound on agent turns (≥ 1) |
 | `dryRunDefault` | Default to dry-run; public examples use synthetic fixtures |
+| `taskStatement` | *(optional)* Operator's stated work, fed verbatim to the genesis prompt |
+| `tuning` | *(optional)* Overrides for routing weights, EWMA, and certification thresholds — [docs/DEFINITIONS.md](docs/DEFINITIONS.md) |
+
+Schema v2 replaces v1's `modelAdapter` with `modelEndpoints`; the validator
+rejects v1 manifests with a migration message.
 
 The allowlist is exhaustive: a command not named in `allowedCommands` cannot be
 run. The workspace is the only filesystem region a run may touch. These are
