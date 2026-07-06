@@ -41,6 +41,7 @@ TUNING_KEYS = {
     "certPass": (0.0, 1.0),
     "demotePass": (0.0, 1.0),
     "routing": None,
+    "ntpAnchor": None,
 }
 ROUTING_WEIGHTS = {"wPrior", "wPass", "wAvail", "wLat"}
 
@@ -89,6 +90,9 @@ def check_tuning(tuning: object, errors: list[str]) -> None:
     for key, value in tuning.items():
         if key not in TUNING_KEYS:
             errors.append(f"tuning has unknown key: {key}")
+        elif key == "ntpAnchor":
+            if not isinstance(value, bool):
+                errors.append("tuning.ntpAnchor must be a boolean")
         elif key == "routing":
             if not isinstance(value, dict):
                 errors.append("tuning.routing must be an object")
