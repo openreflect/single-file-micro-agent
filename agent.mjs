@@ -60,25 +60,6 @@ const mono = () => {
   return (lastSeq = t);
 };
 
-// ---- reference clock (SPEC §4.2): scheduled NTP re-anchor, opt-in via
-// tuning.ntpAnchor; falls back to system wall clock on any failure
-async function ntpTime(host = "pool.ntp.org") {
-  const dgram = await import("node:dgram");
-  return new Promise((resolve, reject) => {
-    const sock = dgram.createSocket("udp4");
-    const pkt = Buffer.alloc(48);
-    pkt[0] = 0x1b;
-    const timer = setTimeout(() => { sock.close(); reject(new Error("ntp timeout")); }, 1500);
-    sock.on("error", (e) => { clearTimeout(timer); sock.close(); reject(e); });
-    sock.on("message", (msg) => {
-      clearTimeout(timer);
-      sock.close();
-      resolve((msg.readUInt32BE(40) - 2208988800) * 1000 + Math.round(msg.readUInt32BE(44) / 4294967.296));
-    });
-    sock.send(pkt, 123, host, (e) => { if (e) { clearTimeout(timer); sock.close(); reject(e); } });
-  });
-}
-
 // ---- trace (DEFINITIONS §1): append-only JSONL
 function openTrace(file) {
   let anchorId = "unanchored";
@@ -90,10 +71,8 @@ function openTrace(file) {
   };
   return {
     emit,
-    anchor(source, wallMs = Date.now()) {
-      const data = { wallMs, source };
-      if (source === "ntp") data.offsetMs = wallMs - Date.now();
-      const e = emit("clock-anchor", 0, data);
+    anchor(source) {
+      const e = emit("clock-anchor", 0, { wallMs: Date.now(), source });
       anchorId = e.id;
       return e;
     },
@@ -206,20 +185,13 @@ const defaultMock = (m) => [
 // exclude: judge independence (SPEC §5.3) — a soft-tier judgment call passes
 // the name of the endpoint that produced the judged work; it is skipped when
 // any other endpoint is usable.
-// self-selection (SPEC §5.7): score = benchmark prior + judged pass rate +
-// measured availability; the agent's own soft-tier verdicts feed passRateEwma
-// via cross-run memory, so routing improves with experience.
-function grid(endpoints, cls, exclude, stats = {}) {
+function grid(endpoints, cls, exclude) {
   const usable = endpoints.filter((ep) => ep.provider === "mock" || (ep.auth ? process.env[ep.auth.clientIdEnv] && process.env[ep.auth.clientSecretEnv] : process.env[KEYS[ep.provider]]));
   const independent = exclude ? usable.filter((ep) => ep.name !== exclude) : usable;
-  const score = (ep) => {
-    const s = stats[ep.name] || {};
-    return 0.4 * ((ep.priors || {})[cls] ?? 0.5) + 0.4 * (s.passRateEwma ?? 0.5) + 0.2 * (s.calls ? 1 - s.failures / s.calls : 0.5);
-  };
-  return (independent.length ? independent : usable).sort((a, b) => score(b) - score(a));
+  return (independent.length ? independent : usable).sort((a, b) => ((b.priors || {})[cls] ?? 0.5) - ((a.priors || {})[cls] ?? 0.5));
 }
 async function callModel(state, sys, msgs, cls, exclude) {
-  const ranked = grid(state.manifest.modelEndpoints, cls, exclude, state.stats);
+  const ranked = grid(state.manifest.modelEndpoints, cls, exclude);
   if (!ranked.length) throw new Error("no usable endpoint: no API key found and no mock configured");
   for (const ep of ranked) {
     if (state.calls >= state.budget.maxModelCalls) { state.halted = "budget"; throw new Error(`budget: maxModelCalls (${state.budget.maxModelCalls}) reached`); }
@@ -229,7 +201,6 @@ async function callModel(state, sys, msgs, cls, exclude) {
       const text = await providers[ep.provider](ep, await authHeaders(ep), sys, msgs, state);
       const ms = performance.now() - t0;
       s.calls++; s.latencyMsEwma = s.latencyMsEwma === null ? ms : 0.3 * ms + 0.7 * s.latencyMsEwma;
-      state.lastEndpoint = ep.name;
       state.trace.emit("call", 1, { endpoint: ep.name, latencyMs: Math.round(ms), ok: true }, [], cls);
       return text;
     } catch (err) {
@@ -299,9 +270,7 @@ async function main() {
   const ws = path.resolve(manifest.workspace);
   fs.mkdirSync(path.join(ws, ".sfma"), { recursive: true });
   const trace = openTrace(path.join(ws, ".sfma", "trace.jsonl"));
-  const useNtp = (manifest.tuning || {}).ntpAnchor === true;
-  const mkAnchor = async () => { if (useNtp) try { return trace.anchor("ntp", await ntpTime()); } catch {} return trace.anchor("system-wall"); };
-  const firstSeq = (await mkAnchor()).seq;
+  const firstSeq = trace.anchor("system-wall").seq;
   const dry = manifest.dryRunDefault && !apply;
   const task = taskFlag || manifest.taskStatement || `Produce the declared outputs (${manifest.outputs.join(", ")}) for task "${manifest.name}".`;
   // arithmetic backstop (SPEC §5.3/§8, DEFINITIONS §6): enforced here in code,
@@ -365,29 +334,6 @@ async function main() {
     const exists = dry ? state.writes.has(o) : fs.existsSync(abs);
     return { path: o, ok: exists, ...(exists && !dry && { sha256: sha256(abs) }) };
   });
-  // epsilon soft tier (SPEC §5.3): per-criterion judgment of finished work.
-  // Judge independence: exclude the endpoint that produced the work; the
-  // judged pass rate feeds that endpoint's passRateEwma (self-selection).
-  const criteria = (candidate?.successCriteria || []).slice(0, 7).map((c) => ({ criterion: c, pass: null }));
-  if (done !== null && !dry && state.hardFails === 0 && criteria.length) {
-    const workEndpoint = state.lastEndpoint;
-    const evidence = outputs.map((o) => (o.ok ? `--- ${o.path} ---\n${clip(fs.readFileSync(path.join(ws, o.path), "utf8"), 2048)}` : `--- ${o.path} --- MISSING`)).join("\n");
-    for (const c of criteria) {
-      try {
-        const txt = await callModel(state, 'You are epsilon\'s soft tier: a strict, independent judge of finished work. Reply with exactly one JSON object, nothing else: {"pass": true|false, "reason": "one sentence"}', [{ role: "user", content: `Task statement: ${task}\nMission: ${candidate.mission ?? ""}\nCriterion to judge: ${c.criterion}\nAgent's completion summary: ${done}\nDeclared outputs:\n${evidence}` }], "reasoning", workEndpoint);
-        const j = parseReply(txt);
-        if (typeof j?.pass === "boolean") { c.pass = j.pass; c.reason = String(j.reason ?? ""); }
-      } catch { break; }
-      trace.emit("verdict", 0, { tier: "soft", pass: c.pass, reason: c.reason ?? "unjudged", criterion: c.criterion });
-    }
-    const judgedNow = criteria.filter((c) => c.pass !== null);
-    if (judgedNow.length && workEndpoint && state.stats[workEndpoint]) {
-      const s = state.stats[workEndpoint], rate = judgedNow.filter((c) => c.pass).length / judgedNow.length;
-      s.passRateEwma = s.passRateEwma == null ? rate : 0.3 * rate + 0.7 * s.passRateEwma;
-    }
-  }
-  const judged = criteria.filter((c) => c.pass !== null);
-
   const complete = done !== null && outputs.every((o) => o.ok) && state.hardFails === 0;
   const verdict = state.halted ? `halted-${state.halted}` : done === null ? (turns >= manifest.maxTurns ? "halted-maxTurns" : "failed") : complete ? "completed" : "failed";
   trace.emit("weight", 0, state.stats);
@@ -395,52 +341,31 @@ async function main() {
   // certification statistics over the run chain (DEFINITIONS §7): pure code
   // over recorded history — no model call, no operator judgment (SPEC §5.6)
   const tun = manifest.tuning || {};
-  memory.runs = [...memory.runs, { at: new Date().toISOString(), verdict, turns, modelCalls: state.calls, hardTierFailures: state.hardFails, dryRun: dry, criteria: judged.length ? { passed: judged.filter((c) => c.pass).length, total: judged.length } : null }].slice(-100);
+  memory.runs = [...memory.runs, { at: new Date().toISOString(), verdict, turns, modelCalls: state.calls, hardTierFailures: state.hardFails, dryRun: dry }].slice(-100);
   memory.endpoints = state.stats;
   const win = memory.runs.filter((r) => !r.dryRun).slice(-(tun.certWindow ?? 20));
   const passRate = win.length ? win.filter((r) => r.verdict === "completed").length / win.length : 0;
-  const softRates = win.map((r) => (r.criteria && r.criteria.total ? r.criteria.passed / r.criteria.total : null)).filter((x) => x !== null);
-  const softRate = softRates.length ? softRates.reduce((a, b) => a + b, 0) / softRates.length : null;
   let transition = null;
-  if (memory.pinned && (state.hardFails > 0 || passRate < (tun.demotePass ?? 0.6) || (softRate !== null && softRate < (tun.demotePass ?? 0.6)))) {
+  if (memory.pinned && (state.hardFails > 0 || passRate < (tun.demotePass ?? 0.6))) {
     memory.pinned = null;
     transition = "demoted";
-  } else if (!memory.pinned && candidate && win.length >= (tun.certWindow ?? 20) && passRate >= (tun.certCompletion ?? 0.9) && (softRate === null || softRate >= (tun.certPass ?? 0.85)) && win.every((r) => r.hardTierFailures === 0)) {
+  } else if (!memory.pinned && candidate && win.length >= (tun.certWindow ?? 20) && passRate >= (tun.certCompletion ?? 0.9) && win.every((r) => r.hardTierFailures === 0)) {
     memory.pinned = { candidate, genesisVersion: GENESIS_VERSION, certifiedAt: new Date().toISOString() };
     transition = "certified";
   }
   if (transition) trace.emit("lifecycle", 0, { from: replay ? "pinned-replay" : "probation", to: transition });
   fs.writeFileSync(memPath, JSON.stringify(memory, null, 2));
 
-  // health rollup — the at-a-glance answer to "how has this been going?"
-  const health = {
-    task: manifest.name, generatedAt: new Date().toISOString(), verdict,
-    runs: memory.runs.length, pinned: memory.pinned ? { since: memory.pinned.certifiedAt } : null,
-    window: { size: win.length, completionRate: Number(passRate.toFixed(3)), criteriaPassRate: softRate === null ? null : Number(softRate.toFixed(3)) },
-    lastVerdicts: memory.runs.slice(-10).map((r) => r.verdict),
-    endpoints: state.stats,
-    lastRun: { turns, modelCalls: state.calls, hardTierFailures: state.hardFails, dryRun: dry },
-  };
-  fs.writeFileSync(path.join(ws, ".sfma", "health.json"), JSON.stringify(health, null, 2));
-  fs.writeFileSync(path.join(ws, ".sfma", "HEALTH.md"), [
-    `# ${manifest.name} — health`, "",
-    `- Generated: ${health.generatedAt} | last verdict: **${verdict}**`,
-    `- Runs: ${health.runs} | pinned config: ${memory.pinned ? `yes, since ${memory.pinned.certifiedAt}` : "no"}`,
-    `- Window of ${win.length}: completion ${(passRate * 100).toFixed(0)}%${softRate !== null ? ` · criteria ${(softRate * 100).toFixed(0)}%` : ""}`,
-    `- Recent verdicts: ${health.lastVerdicts.join(" · ") || "none"}`,
-    `- Last run: ${turns} turns · ${state.calls} model calls · ${state.hardFails} hard-tier failures${dry ? " · dry-run" : ""}`,
-  ].join("\n") + "\n");
-
   trace.emit("lifecycle", 0, { from: replay ? "pinned-replay" : "probation", to: verdict });
-  const lastAnchor = await mkAnchor();
+  const lastAnchor = trace.anchor("system-wall");
 
   const record = {
     manifest, genesisVersion: GENESIS_VERSION,
     bootstrap: candidate, lifecycle: [replay ? "pinned-replay" : "probation", ...(transition ? [transition] : []), verdict],
     memory: { runs: memory.runs.length, pinned: !!memory.pinned },
-    outputs, criteria,
+    outputs, criteria: (candidate?.successCriteria || []).map((c) => ({ criterion: c, pass: null, evidence: [] })),
     weights: state.stats, mutations: { count: 0, refs: [] },
-    clock: { firstSeq, lastSeq: lastAnchor.seq, anchorSource: useNtp ? "ntp (system-wall fallback)" : "system-wall" },
+    clock: { firstSeq, lastSeq: lastAnchor.seq, anchorSource: "system-wall (NTP re-anchor is post-M0)" },
     trace: ".sfma/trace.jsonl", dryRun: dry, turns, modelCalls: state.calls, budget, hardTierFailures: state.hardFails, verdict,
   };
   fs.writeFileSync(path.join(ws, ".sfma", "result.json"), JSON.stringify(record, null, 2));
