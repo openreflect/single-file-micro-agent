@@ -154,10 +154,8 @@ judgment.
 `modelAdapter` (string) is **replaced** by `modelEndpoints` (array, §3.1).
 New optional field `tuning` (object) holds: `ewmaAlpha`, `targetLatencyMs`,
 `routing` (per-class weight vectors), `certWindow`, `certCompletion`,
-`certPass`, `demotePass`, `ntpAnchor` (bool — anchor the trace to NTP time,
-recommended for long-running chains; falls back to system wall clock on any
-failure). Unknown `tuning` keys are a validation error. All other v1 fields
-are unchanged.
+`certPass`, `demotePass`. Unknown `tuning` keys are a validation error.
+All other v1 fields are unchanged.
 
 ## 6. Resource budget (the arithmetic backstop, SPEC §5.3/§8)
 
@@ -194,31 +192,12 @@ the current genesis version), the run **replays** the certified configuration
 — lifecycle starts at `pinned-replay`, bootstrap drafting is skipped, and the
 first model call is work, not drafting.
 
-**Certification:** computed by pure code over the trailing `certWindow`
-(default 20) non-dry runs — certify and pin when the window is full,
-completion rate ≥ `certCompletion` (0.90), hard-tier violations are zero
-across the window, AND (when soft-tier judgments exist in the window) the
-average criteria pass rate is ≥ `certPass` (0.85). **Demotion:** any
-hard-tier violation in a pinned run demotes immediately; completion rate or
-criteria pass rate below `demotePass` (0.60) over the window also demotes.
-Demoted workspaces re-emerge from probation on the next run. Dry runs are
-recorded but excluded from certification statistics. Every transition is a
-`lifecycle` trace and appears in the result record.
-
-**Soft tier (shipped):** on each completed, violation-free, non-dry run, each
-successCriterion (cap 7) is judged by one `reasoning`-class model call — with
-**judge independence**: the endpoint that produced the work is excluded when
-an alternative is usable. Verdicts land as `verdict {tier: "soft"}` traces,
-per-criterion pass/fail in the result record, and the judged pass rate feeds
-the work endpoint's `passRateEwma` — which the routing score uses, so
-**endpoint self-selection improves with the agent's own judged experience**.
-Judgment calls count against `maxModelCalls`.
-
-## 8. Health report (`.sfma/health.json` + `HEALTH.md`)
-
-Rewritten by the floor after every run — the at-a-glance answer to "how has
-this been going?" for unattended operation: task, last verdict, total runs,
-pinned status and since-when, window completion and criteria pass rates, the
-last 10 verdicts, lifetime endpoint profiles, and last-run cost (turns, model
-calls, hard-tier failures). `HEALTH.md` is the same data as five readable
-lines; `health.json` is for dashboards and scripts.
+**Certification (run-level, until the soft tier lands):** computed by pure
+code over the trailing `certWindow` (default 20) non-dry runs — certify and
+pin when the window is full, completion rate ≥ `certCompletion` (0.90), and
+hard-tier violations are zero across the window. **Demotion:** any hard-tier
+violation in a pinned run demotes immediately; completion rate below
+`demotePass` (0.60) over the window also demotes. Demoted workspaces
+re-emerge from probation on the next run. Dry runs are recorded but excluded
+from certification statistics. Every transition is a `lifecycle` trace and
+appears in the result record.

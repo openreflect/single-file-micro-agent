@@ -1,5 +1,7 @@
 # Single File Micro Agent
 
+[![CI](https://github.com/openreflect/single-file-micro-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/openreflect/single-file-micro-agent/actions/workflows/ci.yml)
+
 Single File Micro Agent is a tiny, API-agnostic framework for running disposable autonomous agents in tightly bounded workspaces. It is designed for simple tasks where a full agent platform would add more surface area than the task needs.
 
 The core idea is to keep the harness small enough to inspect, restrict what the agent can touch, and make every run produce a durable result record.
@@ -49,12 +51,11 @@ single-file-micro-agent
 │   ├── Resource budget floor (§5.3/§8)               [shipped: pre-M1 gates]
 │   │   ├── maxModelCalls · maxSeconds · maxLoops · maxPendingTasks
 │   │   └── Operator halt: SIGINT/SIGTERM or .sfma/HALT → halted-operator
-│   ├── Result record                                 [shipped: M0]
-│   │   ├── Emergent configuration capture
-│   │   ├── Re-anchored event ordering
-│   │   ├── Lifecycle transitions + mutation traces
-│   │   └── Endpoint weight snapshots
-│   └── Health rollup (.sfma/health.json + HEALTH.md) [shipped]
+│   └── Result record                                 [shipped: M0]
+│       ├── Emergent configuration capture
+│       ├── Re-anchored event ordering
+│       ├── Lifecycle transitions + mutation traces
+│       └── Endpoint weight snapshots
 ├── Decision core — the flywheel (§5)                 [M0: single-loop floor shipped]
 │   ├── Genesis prompt                                [drafted: prompts/genesis.prompt.md]
 │   ├── Bootstrap → emergent configuration (§5.4)
@@ -62,11 +63,11 @@ single-file-micro-agent
 │   │   └── Each loop = instantiated LLM conversation
 │   ├── Epsilon — replicated governor (§5.3)
 │   │   ├── Hard tier: deterministic manifest floor (immutable)
-│   │   └── Soft tier: per-criterion judge, judge independence [shipped]
+│   │   └── Soft tier: mission adherence, 1..N model calls
 │   ├── Configuration lifecycle (§5.6)                [shipped: run-level pinning]
 │   │   └── Probation → statistical certification → pinning → demotion
-│   └── Endpoint weight grid (§5.7)                   [shipped: self-selecting]
-│       ├── Priors + judged pass rate + availability drive routing
+│   └── Endpoint weight grid (§5.7)
+│       ├── ≥3 LLM API endpoints, self-determined weights
 │       └── Trace-to-weight: benchmark priors + measured latency/availability/pass-fail
 ├── Memory & communication (§6)                       [M0.5: cross-run memory shipped]
 │   ├── Cross-run memory — recall + pinning (.sfma/memory.json)
@@ -74,9 +75,9 @@ single-file-micro-agent
 │   ├── Tiers placed by measured latency (short / medium / long)
 │   ├── Reference discipline (fast tier = pointers only)
 │   └── Recall modes: referential · semantic · episodic
-├── Clocking (§4)                                     [shipped]
+├── Clocking (§4)                                     [M0: monotonic log shipped; NTP pending]
 │   ├── Monotonic ordering log (doubles as episodic index)
-│   └── NTP re-anchor (opt-in: tuning.ntpAnchor, wall-clock fallback)
+│   └── Scheduled NTP re-anchor
 ├── Runtime (§3)                                      [shipped: agent.mjs]
 │   ├── Single non-compiled file, JIT-class runtime
 │   └── Self-modification: mutable policy / immutable floor
@@ -86,14 +87,12 @@ single-file-micro-agent
     └── Public generic upstream · private forks hold keys, logs, observer
 ```
 
-Shipped today: [agent.mjs](agent.mjs) (451 lines, Node ≥ 18 or Deno, zero
+M0 is shipped: [agent.mjs](agent.mjs) (321 lines, Node ≥ 18 or Deno, zero
 dependencies) runs a single loop under the full containment floor — manifest
-enforcement, budgets, dry-run, append-only trace, result record — plus the
-epsilon soft tier (independent per-criterion judging), self-selecting
-endpoint routing, cross-run memory with certification/pinning, health
-rollups, and opt-in NTP anchoring; verified offline by
+enforcement, dry-run, append-only trace, result record — verified offline by
 [tests/test_m0.py](tests/test_m0.py) via the deterministic mock provider.
-Multi-loop bootstrap (the M1 flywheel) is the main unbuilt piece.
+Multi-loop bootstrap, epsilon soft tier, lifecycle, and the live weight grid
+are M1+.
 
 ## Design principles
 
@@ -167,3 +166,7 @@ Use this repository as the generic upstream. Keep private model keys, local runt
 openreflect/single-file-micro-agent  public generic framework
 private downstream fork              local adapters, credentials, task logs
 ```
+
+## License
+
+[MIT](LICENSE)
