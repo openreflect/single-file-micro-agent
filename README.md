@@ -71,6 +71,7 @@ single-file-micro-agent
 │       └── Trace-to-weight: benchmark priors + measured latency/availability/pass-fail
 ├── Memory & communication (§6)                       [M0.5: cross-run memory shipped]
 │   ├── Cross-run memory — recall + pinning (.sfma/memory.json)
+│   ├── Operator mailbox — inbox/outbox chat (§5.5)   [shipped: notify/ask]
 │   ├── Blackboard medium — the only inter-loop channel
 │   ├── Tiers placed by measured latency (short / medium / long)
 │   ├── Reference discipline (fast tier = pointers only)
@@ -156,6 +157,14 @@ audit record; stop any time with Ctrl-C or `touch <workspace>/.sfma/HALT`):
 
 ```bash
 node scripts/run_chain.mjs path/to/manifest.json --every=300 --apply
+```
+
+Chat with a running chain (asynchronous by design — the agent posts status
+and questions to the outbox via `notify`/`ask` without ever blocking; your
+replies land in the inbox and reach it on its next run):
+
+```bash
+node scripts/chat.mjs path/to/workspace
 ```
 
 ## Public/private model

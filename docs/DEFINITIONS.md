@@ -26,7 +26,8 @@ per event. Entries are never edited or deleted; corrections are new entries.
 `{surface, before-ptr, after-ptr}`), `weight` (grid snapshot), `lifecycle`
 (`{from, to}` per §5.6 states), `clarification` (§5.5), `candidate` (bootstrap
 draft), `clock-anchor` (NTP result), `call` (model API request/response
-metadata: endpoint, class, latencyMs, ok).
+metadata: endpoint, class, latencyMs, ok), `message` (operator mailbox,
+`{dir: "in"|"out", kind?, text}` — §8).
 
 ## 2. Result record
 
@@ -201,3 +202,23 @@ violation in a pinned run demotes immediately; completion rate below
 re-emerge from probation on the next run. Dry runs are recorded but excluded
 from certification statistics. Every transition is a `lifecycle` trace and
 appears in the result record.
+
+## 8. Operator mailbox (SPEC §5.5)
+
+Two folders inside the workspace — the engine's only communication surface:
+
+- **`.sfma/inbox/`** (operator → agent): drop plain-text files; the agent
+  reads and consumes them at run start, injecting them as clearly-labeled
+  operator messages. They are clarifications only — the restriction-only rule
+  applies; nothing in the inbox can widen the manifest.
+- **`.sfma/outbox/`** (agent → operator): the `notify` (status) and `ask`
+  (question) tools write one JSON file per message
+  (`{kind, text, at}`). Both are **non-blocking**: an `ask` never pauses the
+  run — the answer, whenever the operator provides one, reaches the agent as
+  an inbox message in a later run of the chain.
+
+Every message in either direction is also a `message` trace entry, so the
+whole conversation is part of the audit record. The chat surface lives
+outside the single file: `scripts/chat.mjs` is a minimal terminal client, and
+any platform (OpenClaw, Hermes, a Slack bot) can be the UI by reading and
+writing these two folders.

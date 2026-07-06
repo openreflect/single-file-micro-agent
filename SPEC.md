@@ -206,6 +206,15 @@ but cannot make it *escape* the containment contract.
   command allowlist, or declared outputs requires the operator.
 - Every clarification and its resolution is captured in the result record, so
   the manifest a run *actually* operated under is auditable.
+- The clarification transport is the **operator mailbox**
+  ([docs/DEFINITIONS.md](docs/DEFINITIONS.md) §8): `.sfma/inbox/` (operator →
+  agent, read and consumed at run start) and `.sfma/outbox/` (agent →
+  operator, via the non-blocking `notify`/`ask` tools). An `ask` never blocks
+  a run — the answer arrives as an operator message in a later run of the
+  chain. Inbox messages are injected as clarifications and are bound by the
+  restriction-only rule above; every message in either direction is a
+  `message` trace. The chat *surface* lives outside the file
+  (scripts/chat.mjs, or any platform that reads and writes these folders).
 
 ### 5.6 Configuration lifecycle — probation to pinned
 
