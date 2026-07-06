@@ -94,7 +94,26 @@ Dry-run exercises the full loop — model calls included — but records writes
 and commands without applying them. Inspect what *would* have happened in
 `<workspace>/.sfma/trace.jsonl`, then run with `--apply`.
 
-## 4. Where things land
+## 4. Run continuously
+
+Extended autonomy is a **relay of bounded runs**, not one unbounded process:
+each run re-enters the manifest contract under its own budget and leaves its
+own audit record, while `.sfma/memory.json` carries learning between runs
+(endpoint profiles, and — once a task proves itself over `certWindow`
+consecutive clean runs — a pinned configuration that replays instead of
+re-emerging).
+
+```bash
+node scripts/run_chain.mjs manifest.json --every=300 --apply   # forever, every 5 min
+node scripts/run_chain.mjs manifest.json --max-runs=10 --apply # bounded chain
+```
+
+Stop it any time: Ctrl-C (finishes the current run first) or
+`touch <workspace>/.sfma/HALT`. A demotion (hard-tier violation or completion
+rate collapse) automatically returns the task to probation — the chain keeps
+running, but trust is re-earned.
+
+## 5. Where things land
 
 Every run writes, inside the workspace only:
 

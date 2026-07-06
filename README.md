@@ -62,12 +62,13 @@ single-file-micro-agent
 │   ├── Epsilon — replicated governor (§5.3)
 │   │   ├── Hard tier: deterministic manifest floor (immutable)
 │   │   └── Soft tier: mission adherence, 1..N model calls
-│   ├── Configuration lifecycle (§5.6)
+│   ├── Configuration lifecycle (§5.6)                [shipped: run-level pinning]
 │   │   └── Probation → statistical certification → pinning → demotion
 │   └── Endpoint weight grid (§5.7)
 │       ├── ≥3 LLM API endpoints, self-determined weights
 │       └── Trace-to-weight: benchmark priors + measured latency/availability/pass-fail
-├── Memory & communication (§6)                       [specified]
+├── Memory & communication (§6)                       [M0.5: cross-run memory shipped]
+│   ├── Cross-run memory — recall + pinning (.sfma/memory.json)
 │   ├── Blackboard medium — the only inter-loop channel
 │   ├── Tiers placed by measured latency (short / medium / long)
 │   ├── Reference discipline (fast tier = pointers only)
@@ -144,7 +145,16 @@ node agent.mjs path/to/manifest.json --apply --task="what to do"
 ```
 
 Every run writes `.sfma/trace.jsonl` (append-only event log) and
-`.sfma/result.json` (the result record) inside the workspace.
+`.sfma/result.json` (the result record) inside the workspace, and maintains
+`.sfma/memory.json` — cross-run memory that certifies and pins proven
+configurations over repeated runs.
+
+Run continuously (a relay of bounded runs — each under its own budget and
+audit record; stop any time with Ctrl-C or `touch <workspace>/.sfma/HALT`):
+
+```bash
+node scripts/run_chain.mjs path/to/manifest.json --every=300 --apply
+```
 
 ## Public/private model
 

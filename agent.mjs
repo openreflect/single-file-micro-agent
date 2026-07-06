@@ -281,11 +281,23 @@ async function main() {
   let signal = null;
   for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => (signal = sig));
   const haltFile = path.join(ws, ".sfma", "HALT");
-  trace.emit("lifecycle", 0, { from: null, to: "probation" });
+
+  // cross-run memory — the long-term tier at M0.5 (DEFINITIONS §7): recall
+  // before work. Endpoint profiles seed the grid; a pinned certified
+  // configuration replays instead of re-emerging (SPEC §5.6).
+  const memPath = path.join(ws, ".sfma", "memory.json");
+  let memory = { version: 1, runs: [], pinned: null, endpoints: {} };
+  try { memory = JSON.parse(fs.readFileSync(memPath, "utf8")); } catch {}
+  state.stats = memory.endpoints || {};
+  const replay = memory.pinned?.genesisVersion === GENESIS_VERSION;
+  let candidate = replay ? memory.pinned.candidate : null;
+  trace.emit("lifecycle", 0, { from: null, to: replay ? "pinned-replay" : "probation" });
 
   const sys = genesis(1, 1, manifest, task, dry);
-  const msgs = [{ role: "user", content: "Emit your bootstrap candidate JSON now." }];
-  let candidate = null, done = null, turns = 0;
+  const msgs = [{ role: "user", content: replay
+    ? `A certified configuration is pinned for this manifest from ${memory.runs.length} prior runs — adopt it, skip drafting: ${JSON.stringify(memory.pinned.candidate)}\nBegin work now: one JSON tool call per turn.`
+    : "Emit your bootstrap candidate JSON now." }];
+  let done = null, turns = 0;
 
   while (turns < manifest.maxTurns) {
     if (signal || fs.existsSync(haltFile)) {
@@ -325,12 +337,32 @@ async function main() {
   const complete = done !== null && outputs.every((o) => o.ok) && state.hardFails === 0;
   const verdict = state.halted ? `halted-${state.halted}` : done === null ? (turns >= manifest.maxTurns ? "halted-maxTurns" : "failed") : complete ? "completed" : "failed";
   trace.emit("weight", 0, state.stats);
-  trace.emit("lifecycle", 0, { from: "probation", to: verdict });
+
+  // certification statistics over the run chain (DEFINITIONS §7): pure code
+  // over recorded history — no model call, no operator judgment (SPEC §5.6)
+  const tun = manifest.tuning || {};
+  memory.runs = [...memory.runs, { at: new Date().toISOString(), verdict, turns, modelCalls: state.calls, hardTierFailures: state.hardFails, dryRun: dry }].slice(-100);
+  memory.endpoints = state.stats;
+  const win = memory.runs.filter((r) => !r.dryRun).slice(-(tun.certWindow ?? 20));
+  const passRate = win.length ? win.filter((r) => r.verdict === "completed").length / win.length : 0;
+  let transition = null;
+  if (memory.pinned && (state.hardFails > 0 || passRate < (tun.demotePass ?? 0.6))) {
+    memory.pinned = null;
+    transition = "demoted";
+  } else if (!memory.pinned && candidate && win.length >= (tun.certWindow ?? 20) && passRate >= (tun.certCompletion ?? 0.9) && win.every((r) => r.hardTierFailures === 0)) {
+    memory.pinned = { candidate, genesisVersion: GENESIS_VERSION, certifiedAt: new Date().toISOString() };
+    transition = "certified";
+  }
+  if (transition) trace.emit("lifecycle", 0, { from: replay ? "pinned-replay" : "probation", to: transition });
+  fs.writeFileSync(memPath, JSON.stringify(memory, null, 2));
+
+  trace.emit("lifecycle", 0, { from: replay ? "pinned-replay" : "probation", to: verdict });
   const lastAnchor = trace.anchor("system-wall");
 
   const record = {
     manifest, genesisVersion: GENESIS_VERSION,
-    bootstrap: candidate, lifecycle: ["probation", verdict],
+    bootstrap: candidate, lifecycle: [replay ? "pinned-replay" : "probation", ...(transition ? [transition] : []), verdict],
+    memory: { runs: memory.runs.length, pinned: !!memory.pinned },
     outputs, criteria: (candidate?.successCriteria || []).map((c) => ({ criterion: c, pass: null, evidence: [] })),
     weights: state.stats, mutations: { count: 0, refs: [] },
     clock: { firstSeq, lastSeq: lastAnchor.seq, anchorSource: "system-wall (NTP re-anchor is post-M0)" },
