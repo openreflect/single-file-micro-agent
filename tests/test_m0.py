@@ -12,7 +12,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -148,6 +150,53 @@ class M0Test(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("TASK_INVALID", r.stderr)
         self.assertIn("modelAdapter was replaced", r.stderr)
+
+    def test_oauth_client_credentials_openai_adapter(self):
+        served = {"token_calls": 0, "chat_calls": 0, "bearers": []}
+        replies = [json.dumps(CANDIDATE),
+                   json.dumps({"tool": "write", "path": "result.json", "content": "oauth-ok"}),
+                   json.dumps({"tool": "done", "summary": "ok"})]
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("content-length", 0)))
+                if self.path == "/token":
+                    served["token_calls"] += 1
+                    assert b"grant_type=client_credentials" in body
+                    assert b"client_id=test-client" in body
+                    out = json.dumps({"access_token": "tok-123", "expires_in": 3600})
+                else:
+                    served["chat_calls"] += 1
+                    served["bearers"].append(self.headers.get("authorization"))
+                    out = json.dumps({"choices": [{"message": {"content": replies[min(served["chat_calls"] - 1, 2)]}}]})
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(out.encode())
+
+            def log_message(self, *a):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            manifest = self.manifest(modelEndpoints=[{
+                "name": "oauth-openai", "provider": "openai", "model": "gpt-test",
+                "baseUrl": base,
+                "auth": {"type": "oauth2-client-credentials", "tokenUrl": f"{base}/token",
+                         "clientIdEnv": "SFMA_TEST_CID", "clientSecretEnv": "SFMA_TEST_SECRET"},
+            }])
+            env = {**os.environ, "SFMA_TEST_CID": "test-client", "SFMA_TEST_SECRET": "test-secret"}
+            r = subprocess.run(RUNNER + [str(manifest), "--apply"],
+                               capture_output=True, text=True, env=env, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual((self.ws / "result.json").read_text(), "oauth-ok")
+            self.assertEqual(served["token_calls"], 1)  # cached across all 3 model calls
+            self.assertEqual(served["chat_calls"], 3)
+            self.assertEqual(set(served["bearers"]), {"Bearer tok-123"})
+        finally:
+            server.shutdown()
 
     def test_trace_is_ordered_and_anchored(self):
         script = [CANDIDATE, {"tool": "done", "summary": "minimal"}]

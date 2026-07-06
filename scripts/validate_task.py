@@ -20,8 +20,11 @@ REQUIRED_FIELDS = {
 }
 
 ENDPOINT_REQUIRED = {"name": str, "provider": str, "model": str}
-ENDPOINT_OPTIONAL = {"baseUrl": str, "priors": dict}
+ENDPOINT_OPTIONAL = {"baseUrl": str, "priors": dict, "auth": dict}
 PRIOR_CLASSES = {"reasoning", "mechanical"}
+AUTH_REQUIRED = {"type": str, "tokenUrl": str, "clientIdEnv": str, "clientSecretEnv": str}
+AUTH_OPTIONAL = {"scope": str}
+AUTH_TYPES = {"oauth2-client-credentials"}
 
 TUNING_KEYS = {
     "ewmaAlpha": (0.0, 1.0),
@@ -57,6 +60,19 @@ def check_endpoints(endpoints: list, errors: list[str]) -> None:
                 errors.append(f"{where}.priors has unknown class: {cls}")
             elif not isinstance(value, (int, float)) or not 0 <= value <= 1:
                 errors.append(f"{where}.priors.{cls} must be a number in [0, 1]")
+        if isinstance(ep.get("auth"), dict):
+            auth = ep["auth"]
+            for key, expected in AUTH_REQUIRED.items():
+                if not isinstance(auth.get(key), expected):
+                    errors.append(f"{where}.auth missing or invalid: {key}")
+            if auth.get("type") is not None and auth.get("type") not in AUTH_TYPES:
+                errors.append(f"{where}.auth.type must be one of {sorted(AUTH_TYPES)}")
+            for key in auth:
+                if key not in AUTH_REQUIRED and key not in AUTH_OPTIONAL:
+                    errors.append(f"{where}.auth has unknown key: {key}")
+            if any(k for k in (auth.get("clientIdEnv"), auth.get("clientSecretEnv"))
+                   if isinstance(k, str) and not k.isidentifier()):
+                errors.append(f"{where}.auth env names must be identifiers, never secret values")
 
 
 def check_tuning(tuning: object, errors: list[str]) -> None:

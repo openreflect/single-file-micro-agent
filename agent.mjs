@@ -109,21 +109,44 @@ function checkCmd(cmd, allowed) {
 }
 
 // ---- providers (SPEC §5.7; M0: prior-ranked failover, EWMA measurement)
+// Auth per endpoint: default is a provider API key from env; an optional
+// manifest `auth` block ({type:"oauth2-client-credentials", tokenUrl,
+// clientIdEnv, clientSecretEnv, scope?}) switches the endpoint to OAuth2 —
+// tokens are fetched, cached, and refreshed 60s before expiry. Secrets stay
+// in env (SPEC §10); the manifest names variables, never values.
 const KEYS = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", gemini: "GEMINI_API_KEY" };
+const tokenCache = {};
+async function authHeaders(ep) {
+  const a = ep.auth;
+  if (!a) {
+    const key = process.env[KEYS[ep.provider]];
+    return ep.provider === "anthropic" ? { "x-api-key": key } : { authorization: `Bearer ${key}` };
+  }
+  if (a.type !== "oauth2-client-credentials") throw new Error(`unsupported auth type: ${a.type}`);
+  const cached = tokenCache[ep.name];
+  if (cached && cached.exp > Date.now() + 60000) return { authorization: `Bearer ${cached.token}` };
+  const body = new URLSearchParams({ grant_type: "client_credentials", client_id: process.env[a.clientIdEnv] ?? "", client_secret: process.env[a.clientSecretEnv] ?? "", ...(a.scope && { scope: a.scope }) });
+  const res = await fetch(a.tokenUrl, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body, signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`oauth token endpoint HTTP ${res.status}`);
+  const tok = await res.json();
+  tokenCache[ep.name] = { token: tok.access_token, exp: Date.now() + (tok.expires_in ?? 300) * 1000 };
+  return { authorization: `Bearer ${tok.access_token}` };
+}
 const providers = {
-  anthropic: async (ep, key, sys, msgs) => {
-    const r = await post(`${ep.baseUrl || "https://api.anthropic.com"}/v1/messages`, { "x-api-key": key, "anthropic-version": "2023-06-01" }, { model: ep.model, max_tokens: 4096, system: sys, messages: msgs });
+  anthropic: async (ep, auth, sys, msgs) => {
+    const r = await post(`${ep.baseUrl || "https://api.anthropic.com"}/v1/messages`, { ...auth, "anthropic-version": "2023-06-01" }, { model: ep.model, max_tokens: 4096, system: sys, messages: msgs });
     return r.content[0].text;
   },
-  openai: async (ep, key, sys, msgs) => {
-    const r = await post(`${ep.baseUrl || "https://api.openai.com"}/v1/chat/completions`, { authorization: `Bearer ${key}` }, { model: ep.model, messages: [{ role: "system", content: sys }, ...msgs] });
+  openai: async (ep, auth, sys, msgs) => {
+    const r = await post(`${ep.baseUrl || "https://api.openai.com"}/v1/chat/completions`, auth, { model: ep.model, messages: [{ role: "system", content: sys }, ...msgs] });
     return r.choices[0].message.content;
   },
-  gemini: async (ep, key, sys, msgs) => {
-    const r = await post(`${ep.baseUrl || "https://generativelanguage.googleapis.com"}/v1beta/models/${ep.model}:generateContent?key=${key}`, {}, { system_instruction: { parts: [{ text: sys }] }, contents: msgs.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })) });
+  gemini: async (ep, auth, sys, msgs) => {
+    const keyParam = ep.auth ? "" : `?key=${process.env[KEYS.gemini]}`;
+    const r = await post(`${ep.baseUrl || "https://generativelanguage.googleapis.com"}/v1beta/models/${ep.model}:generateContent${keyParam}`, ep.auth ? auth : {}, { system_instruction: { parts: [{ text: sys }] }, contents: msgs.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })) });
     return r.candidates[0].content.parts[0].text;
   },
-  mock: async (ep, key, sys, msgs, state) => {
+  mock: async (ep, auth, sys, msgs, state) => {
     if (!state.mockQ) state.mockQ = process.env.SFMA_MOCK ? JSON.parse(process.env.SFMA_MOCK) : defaultMock(state.manifest);
     const next = state.mockQ.shift() ?? { tool: "done", summary: "mock queue exhausted" };
     return typeof next === "string" ? next : JSON.stringify(next);
@@ -141,7 +164,7 @@ const defaultMock = (m) => [
 ];
 
 function grid(endpoints, cls) {
-  const usable = endpoints.filter((ep) => ep.provider === "mock" || process.env[KEYS[ep.provider]]);
+  const usable = endpoints.filter((ep) => ep.provider === "mock" || (ep.auth ? process.env[ep.auth.clientIdEnv] && process.env[ep.auth.clientSecretEnv] : process.env[KEYS[ep.provider]]));
   return usable.sort((a, b) => ((b.priors || {})[cls] ?? 0.5) - ((a.priors || {})[cls] ?? 0.5));
 }
 async function callModel(state, sys, msgs, cls) {
@@ -150,7 +173,7 @@ async function callModel(state, sys, msgs, cls) {
   for (const ep of ranked) {
     const t0 = performance.now(), s = (state.stats[ep.name] ??= { calls: 0, failures: 0, latencyMsEwma: null });
     try {
-      const text = await providers[ep.provider](ep, process.env[KEYS[ep.provider]], sys, msgs, state);
+      const text = await providers[ep.provider](ep, await authHeaders(ep), sys, msgs, state);
       const ms = performance.now() - t0;
       s.calls++; s.latencyMsEwma = s.latencyMsEwma === null ? ms : 0.3 * ms + 0.7 * s.latencyMsEwma;
       state.trace.emit("call", 1, { endpoint: ep.name, latencyMs: Math.round(ms), ok: true }, [], cls);
