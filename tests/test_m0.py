@@ -257,6 +257,62 @@ class M0Test(unittest.TestCase):
         self.assertEqual(len(in_traces), 1)
         self.assertEqual(in_traces[0]["data"]["text"], "use JSON format")
 
+    def test_telegram_bridge_relay(self):
+        import time
+
+        served = {"sends": []}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
+                if self.path.endswith("/getUpdates"):
+                    if body.get("offset", 0) == 0:
+                        result = [
+                            {"update_id": 1, "message": {"chat": {"id": 999, "username": "intruder"}, "text": "evil widen"}},
+                            {"update_id": 2, "message": {"chat": {"id": 42, "username": "mitchell"}, "text": "use spaces"}},
+                        ]
+                    else:
+                        time.sleep(0.2)
+                        result = []
+                else:
+                    served["sends"].append(body)
+                    result = {}
+                out = json.dumps({"ok": True, "result": result})
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(out.encode())
+
+            def log_message(self, *a):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        sfma = self.ws / ".sfma"
+        (sfma / "outbox").mkdir(parents=True)
+        (sfma / "outbox" / "100-ask.json").write_text(json.dumps(
+            {"kind": "ask", "text": "tabs or spaces?", "at": "2026-07-06T00:00:00Z"}))
+        env = {**os.environ, "TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "42",
+               "TELEGRAM_API_BASE": f"http://127.0.0.1:{server.server_port}", "TELEGRAM_POLL_TIMEOUT": "1"}
+        proc = subprocess.Popen(["node", str(REPO / "scripts" / "telegram_bridge.mjs"), str(self.ws)],
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                inbox_files = list((sfma / "inbox").glob("*.txt")) if (sfma / "inbox").exists() else []
+                if inbox_files and served["sends"]:
+                    break
+                time.sleep(0.2)
+            self.assertEqual(len(inbox_files), 1, "unauthorized chat must be ignored")
+            self.assertIn("telegram-mitchell", inbox_files[0].name)
+            self.assertEqual(inbox_files[0].read_text().strip(), "use spaces")
+            self.assertEqual(served["sends"][0]["chat_id"], 42)
+            self.assertIn("tabs or spaces?", served["sends"][0]["text"])
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+            server.shutdown()
+
     def test_invalid_manifest_rejected(self):
         p = self.manifest()
         p.write_text(json.dumps({"name": "bad", "modelAdapter": "v1"}))

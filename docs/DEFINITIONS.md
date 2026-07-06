@@ -219,6 +219,8 @@ Two folders inside the workspace — the engine's only communication surface:
 
 Every message in either direction is also a `message` trace entry, so the
 whole conversation is part of the audit record. The chat surface lives
-outside the single file: `scripts/chat.mjs` is a minimal terminal client, and
-any platform (OpenClaw, Hermes, a Slack bot) can be the UI by reading and
+outside the single file: `scripts/chat.mjs` is a minimal terminal client,
+`scripts/telegram_bridge.mjs` relays to a Telegram bot (locked to one
+`TELEGRAM_CHAT_ID`; inbox filenames carry sender attribution), and any
+platform (OpenClaw, Hermes, a Slack bot) can be the UI by reading and
 writing these two folders.
