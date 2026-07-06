@@ -192,12 +192,49 @@ the current genesis version), the run **replays** the certified configuration
 — lifecycle starts at `pinned-replay`, bootstrap drafting is skipped, and the
 first model call is work, not drafting.
 
-**Certification (run-level, until the soft tier lands):** computed by pure
-code over the trailing `certWindow` (default 20) non-dry runs — certify and
-pin when the window is full, completion rate ≥ `certCompletion` (0.90), and
-hard-tier violations are zero across the window. **Demotion:** any hard-tier
-violation in a pinned run demotes immediately; completion rate below
-`demotePass` (0.60) over the window also demotes. Demoted workspaces
-re-emerge from probation on the next run. Dry runs are recorded but excluded
-from certification statistics. Every transition is a `lifecycle` trace and
-appears in the result record.
+**Live scoring (shipped):** routing now computes the §3.3 score for real —
+priors + measured pass rate, availability EWMA, and latency EWMA, with
+3-consecutive-failure down detection and 30s→10min backoff. Because
+endpoint profiles persist in memory, the grid's self-chosen distribution
+across providers carries over between runs and keeps tuning for the life of
+the workspace.
+
+**Certification:** computed by pure code over the trailing `certWindow`
+(default 20) non-dry runs — certify and pin when the window is full,
+completion rate ≥ `certCompletion` (0.90), and hard-tier violations are zero
+across the window. A run only counts as `completed` if it also passed the
+soft tier (§8), so certification now certifies work quality, not just rule
+compliance. **Demotion:** any hard-tier violation in a pinned run demotes
+immediately; completion rate below `demotePass` (0.60) over the window also
+demotes. Demoted workspaces re-emerge from probation on the next run. Dry
+runs are recorded but excluded from certification statistics. Every
+transition is a `lifecycle` trace and appears in the result record.
+
+## 8. Soft tier — the independent quality judge
+
+After a run finishes clean on the hard tier (done, outputs produced, zero
+violations, not dry), epsilon's soft tier judges the work against the
+bootstrap's `successCriteria`: one `reasoning`-class model call given the
+task statement, the criteria, and the produced outputs (clipped), returning
+per-criterion pass/fail with evidence. **Judge independence:** the call
+excludes the endpoint that produced the work whenever another endpoint is
+usable. A soft-tier fail fails the run; judge *unavailability* does not —
+criteria stay `null` and the record says `softTier: "unavailable"`. Verdicts
+land as `verdict` traces (`tier: "soft"`), feed the endpoint `passRate`
+EWMAs, and set `softPass` on the run's memory entry.
+
+## 9. Health report (`.sfma/health.md`)
+
+Rewritten after every run by pure code over recorded history: status
+(PINNED/PROBATION), window and lifetime completion and soft-pass rates,
+hard-tier violation counts, model-call totals, a per-endpoint table (calls,
+fail%, latency, availability, pass rate), and the last five runs. The
+one-page answer to "how has this been going?" for unattended chains.
+
+## 10. Clock anchoring (`SFMA_NTP`)
+
+Anchors default to the system wall clock, honestly labeled `system-wall`.
+Set `SFMA_NTP=1` (pool.ntp.org) or `SFMA_NTP=host[:port]` to anchor the
+trace against SNTP at run start and end — anchor entries then carry
+`source: "ntp:<host>"` and the measured `offsetMs`. Any NTP failure falls
+back to `system-wall(ntp-failed)` within 1.5s; the run never blocks on time.
