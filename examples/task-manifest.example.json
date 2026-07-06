@@ -1,10 +1,35 @@
 {
   "name": "summarize-fixture",
   "workspace": "examples/workspaces/summarize-fixture",
-  "modelAdapter": "example-adapter",
+  "modelEndpoints": [
+    {
+      "name": "anthropic-primary",
+      "provider": "anthropic",
+      "model": "claude-sonnet-5",
+      "priors": { "reasoning": 0.9, "mechanical": 0.8 }
+    },
+    {
+      "name": "openai-secondary",
+      "provider": "openai",
+      "model": "gpt-5.2",
+      "priors": { "reasoning": 0.85, "mechanical": 0.8 }
+    },
+    {
+      "name": "gemini-tertiary",
+      "provider": "gemini",
+      "model": "gemini-3-pro",
+      "priors": { "reasoning": 0.85, "mechanical": 0.85 }
+    }
+  ],
   "allowedCommands": ["python3"],
   "inputs": ["input.txt"],
   "outputs": ["result.json"],
   "maxTurns": 3,
-  "dryRunDefault": true
+  "dryRunDefault": true,
+  "tuning": {
+    "certWindow": 20,
+    "certCompletion": 0.9,
+    "certPass": 0.85,
+    "demotePass": 0.6
+  }
 }
