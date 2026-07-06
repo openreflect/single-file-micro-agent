@@ -225,6 +225,38 @@ class M0Test(unittest.TestCase):
         mem = json.loads((self.ws / ".sfma" / "memory.json").read_text())
         self.assertEqual(len(mem["runs"]), 2)
 
+    def test_mailbox_notify_and_ask_outbound(self):
+        script = [CANDIDATE,
+                  {"tool": "notify", "text": "starting the job"},
+                  {"tool": "ask", "question": "tabs or spaces?"},
+                  {"tool": "write", "path": "result.json", "content": "ok"},
+                  {"tool": "done", "summary": "ok"}]
+        r = self.run_agent(self.manifest(), script)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        outbox = sorted((self.ws / ".sfma" / "outbox").iterdir())
+        self.assertEqual(len(outbox), 2)
+        msgs = [json.loads(f.read_text()) for f in outbox]
+        self.assertEqual([m["kind"] for m in msgs], ["notify", "ask"])
+        self.assertEqual(msgs[1]["text"], "tabs or spaces?")
+        out_traces = [t for t in self.traces() if t["kind"] == "message" and t["data"]["dir"] == "out"]
+        self.assertEqual(len(out_traces), 2)
+        self.assertEqual(self.record()["hardTierFailures"], 0)
+
+    def test_mailbox_inbox_consumed_and_round_trip(self):
+        ask = [CANDIDATE, {"tool": "ask", "question": "which format?"},
+               {"tool": "done", "summary": "waiting"}]
+        m = self.manifest(outputs=[])
+        self.run_agent(m, ask)
+        (self.ws / ".sfma" / "inbox" / "1-operator.txt").write_text("use JSON format\n")
+        answer_run = [CANDIDATE, {"tool": "write", "path": "answered.txt", "content": "ok"},
+                      {"tool": "done", "summary": "ok"}]
+        r2 = self.run_agent(self.manifest(outputs=["answered.txt"]), answer_run)
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertEqual(list((self.ws / ".sfma" / "inbox").iterdir()), [])
+        in_traces = [t for t in self.traces() if t["kind"] == "message" and t["data"]["dir"] == "in"]
+        self.assertEqual(len(in_traces), 1)
+        self.assertEqual(in_traces[0]["data"]["text"], "use JSON format")
+
     def test_invalid_manifest_rejected(self):
         p = self.manifest()
         p.write_text(json.dumps({"name": "bad", "modelAdapter": "v1"}))

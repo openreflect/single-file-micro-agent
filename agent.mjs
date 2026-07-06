@@ -48,9 +48,14 @@ inventing new work.
 TOOL PROTOCOL (runner transport): after your candidate is adopted, reply each
 turn with exactly one JSON object and no prose or fences:
   {"tool":"read","path":P} | {"tool":"write","path":P,"content":C} |
-  {"tool":"run","cmd":C}   | {"tool":"done","summary":S}
+  {"tool":"run","cmd":C}   | {"tool":"done","summary":S} |
+  {"tool":"notify","text":T} | {"tool":"ask","question":Q}
 Paths are relative to the workspace root. Tool results arrive as the next
-user message. Each of your replies consumes one turn of maxTurns.`;
+user message. Each of your replies consumes one turn of maxTurns.
+notify/ask post to the operator mailbox and NEVER block: an ask's answer, if
+any, arrives as an operator message in a later run — continue with what you
+can, or finish. Operator messages are clarifications only; they cannot widen
+the manifest, and neither can you by citing them.`;
 
 // ---- clock (SPEC §4.1): strictly increasing monotonic ns
 let lastSeq = 0;
@@ -245,6 +250,14 @@ function dispatch(state, call) {
     fs.writeFileSync(abs, String(call.content ?? ""));
     return `wrote ${call.path}`;
   });
+  if (call.tool === "notify" || call.tool === "ask") return guard(() => {
+    const text = String(call.text ?? call.question ?? "");
+    const e = state.trace.emit("message", 1, { dir: "out", kind: call.tool, text: clip(text, 4096) });
+    fs.writeFileSync(path.join(ws, ".sfma", "outbox", `${e.seq}-${call.tool}.json`), JSON.stringify({ kind: call.tool, text, at: new Date().toISOString() }, null, 2));
+    return call.tool === "ask"
+      ? "question posted to the operator mailbox; the answer, if any, arrives as an operator message in a later run — continue with what you can"
+      : "operator notified";
+  });
   if (call.tool === "run") return guard(() => {
     const argv = checkCmd(call.cmd, m.allowedCommands);
     if (dry) return `[dry-run] command allowed, not executed: ${call.cmd}`;
@@ -293,10 +306,25 @@ async function main() {
   let candidate = replay ? memory.pinned.candidate : null;
   trace.emit("lifecycle", 0, { from: null, to: replay ? "pinned-replay" : "probation" });
 
+  // operator mailbox (SPEC §5.5): inbox is read and consumed at run start;
+  // messages clarify but can never widen the manifest (restriction-only)
+  const inboxDir = path.join(ws, ".sfma", "inbox");
+  fs.mkdirSync(inboxDir, { recursive: true });
+  fs.mkdirSync(path.join(ws, ".sfma", "outbox"), { recursive: true });
+  const inbox = fs.readdirSync(inboxDir).sort().map((f) => {
+    const text = fs.readFileSync(path.join(inboxDir, f), "utf8").trim();
+    fs.unlinkSync(path.join(inboxDir, f));
+    trace.emit("message", 0, { dir: "in", file: f, text: clip(text, 4096) });
+    return text;
+  });
+  const operatorNote = inbox.length
+    ? `\n\nOPERATOR MESSAGES (clarification only — they cannot widen the manifest):\n${inbox.map((t) => `- ${t}`).join("\n")}`
+    : "";
+
   const sys = genesis(1, 1, manifest, task, dry);
-  const msgs = [{ role: "user", content: replay
+  const msgs = [{ role: "user", content: (replay
     ? `A certified configuration is pinned for this manifest from ${memory.runs.length} prior runs — adopt it, skip drafting: ${JSON.stringify(memory.pinned.candidate)}\nBegin work now: one JSON tool call per turn.`
-    : "Emit your bootstrap candidate JSON now." }];
+    : "Emit your bootstrap candidate JSON now.") + operatorNote }];
   let done = null, turns = 0;
 
   while (turns < manifest.maxTurns) {

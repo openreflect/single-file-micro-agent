@@ -113,6 +113,13 @@ Stop it any time: Ctrl-C (finishes the current run first) or
 rate collapse) automatically returns the task to probation — the chain keeps
 running, but trust is re-earned.
 
+**Talk to it** with `node scripts/chat.mjs <workspace>` — the agent posts
+status (`notify`) and questions (`ask`) to `.sfma/outbox/` without blocking;
+whatever you type lands in `.sfma/inbox/` and reaches it at its next run.
+Inbox messages are clarifications only: they can narrow the work, never widen
+the manifest. Every message both ways is in the audit trace. Any platform can
+be the chat surface by reading/writing those two folders.
+
 ## 5. Where things land
 
 Every run writes, inside the workspace only:
