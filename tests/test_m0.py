@@ -35,6 +35,9 @@ CANDIDATE = {
     "schedule": [],
 }
 
+JUDGE_PASS = {"criteria": [{"criterion": "result.json exists in the workspace", "pass": True, "evidence": "file present"}], "overallPass": True}
+JUDGE_FAIL = {"criteria": [{"criterion": "result.json exists in the workspace", "pass": False, "evidence": "content does not satisfy the task"}], "overallPass": False}
+
 
 class M0Test(unittest.TestCase):
     def setUp(self):
@@ -80,7 +83,7 @@ class M0Test(unittest.TestCase):
 
     def test_happy_path_apply(self):
         script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
-                  {"tool": "done", "summary": "ok"}]
+                  {"tool": "done", "summary": "ok"}, JUDGE_PASS]
         r = self.run_agent(self.manifest(), script)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual((self.ws / "result.json").read_text(), "ok")
@@ -89,8 +92,60 @@ class M0Test(unittest.TestCase):
         self.assertEqual(rec["bootstrap"]["mission"], CANDIDATE["mission"])
         self.assertTrue(rec["outputs"][0]["sha256"])
         self.assertEqual(rec["hardTierFailures"], 0)
+        self.assertEqual(rec["softTier"], "passed")
+        self.assertTrue(rec["criteria"][0]["pass"])
+        soft = self.verdicts(tier="soft")
+        self.assertTrue(soft and soft[0]["data"]["pass"])
         kinds = {t["kind"] for t in self.traces()}
         self.assertLessEqual({"clock-anchor", "lifecycle", "candidate", "call", "task", "verdict", "weight"}, kinds)
+
+    def test_soft_tier_failure_fails_run(self):
+        script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "junk"},
+                  {"tool": "done", "summary": "ok"}, JUDGE_FAIL]
+        r = self.run_agent(self.manifest(), script)
+        self.assertEqual(r.returncode, 1)
+        rec = self.record()
+        self.assertEqual(rec["verdict"], "failed")
+        self.assertEqual(rec["softTier"], "failed")
+        self.assertEqual(rec["hardTierFailures"], 0)
+        mem = json.loads((self.ws / ".sfma" / "memory.json").read_text())
+        self.assertIs(mem["runs"][-1]["softPass"], False)
+
+    def test_health_report_written(self):
+        script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
+                  {"tool": "done", "summary": "ok"}, JUDGE_PASS]
+        self.run_agent(self.manifest(), script)
+        health = (self.ws / ".sfma" / "health.md").read_text()
+        self.assertIn("**Status:** PROBATION", health)
+        self.assertIn("| completion | 100% | 100% |", health)
+        self.assertIn("| mock |", health)
+        self.assertIn("Last 5 runs", health)
+
+    def test_ntp_anchor(self):
+        import socket
+        import struct
+        import time as _time
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+        def serve():
+            data, addr = sock.recvfrom(48)
+            reply = bytearray(48)
+            struct.pack_into("!I", reply, 40, int(_time.time()) + 2208988800)
+            sock.sendto(bytes(reply), addr)
+
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        script = [CANDIDATE, {"tool": "done", "summary": "minimal"}]
+        env = {**os.environ, "SFMA_MOCK": json.dumps(script), "SFMA_NTP": f"127.0.0.1:{port}"}
+        r = subprocess.run(RUNNER + [str(self.manifest(outputs=[]))],
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        first = self.traces()[0]
+        self.assertEqual(first["data"]["source"], "ntp:127.0.0.1")
+        self.assertLess(abs(first["data"]["offsetMs"]), 5000)
+        sock.close()
 
     def test_dry_run_writes_nothing(self):
         script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
@@ -166,7 +221,7 @@ class M0Test(unittest.TestCase):
 
     def test_cross_run_memory_certifies_and_pins(self):
         script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
-                  {"tool": "done", "summary": "ok"}]
+                  {"tool": "done", "summary": "ok"}, JUDGE_PASS]
         m = self.manifest(tuning={"certWindow": 2})
         r1 = self.run_agent(m, script)
         self.assertEqual(r1.returncode, 0, r1.stdout + r1.stderr)
@@ -182,23 +237,23 @@ class M0Test(unittest.TestCase):
 
     def test_pinned_replay_skips_bootstrap(self):
         pin = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
-               {"tool": "done", "summary": "ok"}]
+               {"tool": "done", "summary": "ok"}, JUDGE_PASS]
         m = self.manifest(tuning={"certWindow": 2})
         self.run_agent(m, pin)
         self.run_agent(m, pin)
         replay = [{"tool": "write", "path": "result.json", "content": "replayed"},
-                  {"tool": "done", "summary": "ok"}]
+                  {"tool": "done", "summary": "ok"}, JUDGE_PASS]
         r3 = self.run_agent(m, replay)
         self.assertEqual(r3.returncode, 0, r3.stdout + r3.stderr)
         rec = self.record()
         self.assertEqual(rec["lifecycle"][0], "pinned-replay")
         self.assertEqual(rec["bootstrap"]["mission"], CANDIDATE["mission"])
-        self.assertEqual(rec["modelCalls"], 2)
+        self.assertEqual(rec["modelCalls"], 3)
         self.assertEqual((self.ws / "result.json").read_text(), "replayed")
 
     def test_demotion_on_hard_violation(self):
         pin = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
-               {"tool": "done", "summary": "ok"}]
+               {"tool": "done", "summary": "ok"}, JUDGE_PASS]
         m = self.manifest(tuning={"certWindow": 2})
         self.run_agent(m, pin)
         self.run_agent(m, pin)
@@ -214,7 +269,7 @@ class M0Test(unittest.TestCase):
 
     def test_run_chain_relay(self):
         script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
-                  {"tool": "done", "summary": "ok"}]
+                  {"tool": "done", "summary": "ok"}, JUDGE_PASS]
         m = self.manifest()
         env = {**os.environ, "SFMA_MOCK": json.dumps(script)}
         r = subprocess.run(["node", str(REPO / "scripts" / "run_chain.mjs"), str(m),
@@ -237,7 +292,8 @@ class M0Test(unittest.TestCase):
         served = {"token_calls": 0, "chat_calls": 0, "bearers": []}
         replies = [json.dumps(CANDIDATE),
                    json.dumps({"tool": "write", "path": "result.json", "content": "oauth-ok"}),
-                   json.dumps({"tool": "done", "summary": "ok"})]
+                   json.dumps({"tool": "done", "summary": "ok"}),
+                   json.dumps(JUDGE_PASS)]
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -250,7 +306,7 @@ class M0Test(unittest.TestCase):
                 else:
                     served["chat_calls"] += 1
                     served["bearers"].append(self.headers.get("authorization"))
-                    out = json.dumps({"choices": [{"message": {"content": replies[min(served["chat_calls"] - 1, 2)]}}]})
+                    out = json.dumps({"choices": [{"message": {"content": replies[min(served["chat_calls"] - 1, 3)]}}]})
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
                 self.end_headers()
@@ -274,8 +330,8 @@ class M0Test(unittest.TestCase):
                                capture_output=True, text=True, env=env, timeout=120)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual((self.ws / "result.json").read_text(), "oauth-ok")
-            self.assertEqual(served["token_calls"], 1)  # cached across all 3 model calls
-            self.assertEqual(served["chat_calls"], 3)
+            self.assertEqual(served["token_calls"], 1)  # cached across all 4 model calls
+            self.assertEqual(served["chat_calls"], 4)  # candidate, write, done, judge
             self.assertEqual(set(served["bearers"]), {"Bearer tok-123"})
         finally:
             server.shutdown()
@@ -284,13 +340,14 @@ class M0Test(unittest.TestCase):
         served = {"calls": 0, "headers": []}
         replies = [json.dumps(CANDIDATE),
                    json.dumps({"tool": "write", "path": "result.json", "content": "codex-ok"}),
-                   json.dumps({"tool": "done", "summary": "ok"})]
+                   json.dumps({"tool": "done", "summary": "ok"}),
+                   json.dumps(JUDGE_PASS)]
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 self.rfile.read(int(self.headers.get("content-length", 0)))
                 served["headers"].append({k.lower(): v for k, v in self.headers.items()})
-                text = replies[min(served["calls"], 2)]
+                text = replies[min(served["calls"], 3)]
                 served["calls"] += 1
                 mid = len(text) // 2
                 sse = "".join(
@@ -319,7 +376,7 @@ class M0Test(unittest.TestCase):
                                capture_output=True, text=True, env=env, timeout=120)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertEqual((self.ws / "result.json").read_text(), "codex-ok")
-            self.assertEqual(served["calls"], 3)
+            self.assertEqual(served["calls"], 4)  # candidate, write, done, judge
             h = served["headers"][0]
             self.assertEqual(h.get("authorization"), "Bearer codex-tok")
             self.assertEqual(h.get("chatgpt-account-id"), "acct-42")

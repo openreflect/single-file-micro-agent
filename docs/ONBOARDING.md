@@ -113,6 +113,17 @@ Stop it any time: Ctrl-C (finishes the current run first) or
 rate collapse) automatically returns the task to probation — the chain keeps
 running, but trust is re-earned.
 
+Any scheduler works instead of the relay — each run is standalone, all
+learning lives in the workspace files. Cron example, nightly at 02:00:
+
+```cron
+0 2 * * * cd /path/to/repo && node agent.mjs jobs/nightly.json --apply
+```
+
+Supervise from a distance via `<workspace>/.sfma/health.md` — status, success
+rates, and per-endpoint performance, rewritten after every run. For trusted
+timestamps on long chains, set `SFMA_NTP=1` in the environment.
+
 ## 5. Where things land
 
 Every run writes, inside the workspace only:

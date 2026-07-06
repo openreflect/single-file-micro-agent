@@ -61,21 +61,22 @@ single-file-micro-agent
 │   │   └── Each loop = instantiated LLM conversation
 │   ├── Epsilon — replicated governor (§5.3)
 │   │   ├── Hard tier: deterministic manifest floor (immutable)
-│   │   └── Soft tier: mission adherence, 1..N model calls
+│   │   └── Soft tier: independent quality judge          [shipped]
+│   │       └── Judge never routes to the endpoint that did the work
 │   ├── Configuration lifecycle (§5.6)                [shipped: run-level pinning]
 │   │   └── Probation → statistical certification → pinning → demotion
-│   └── Endpoint weight grid (§5.7)
-│       ├── ≥3 LLM API endpoints, self-determined weights
-│       └── Trace-to-weight: benchmark priors + measured latency/availability/pass-fail
+│   └── Endpoint weight grid (§5.7)                   [shipped: live scoring]
+│       ├── Self-chosen distribution across endpoints, per task class
+│       └── Priors + measured pass/availability/latency; down detection + backoff
 ├── Memory & communication (§6)                       [M0.5: cross-run memory shipped]
 │   ├── Cross-run memory — recall + pinning (.sfma/memory.json)
 │   ├── Blackboard medium — the only inter-loop channel
 │   ├── Tiers placed by measured latency (short / medium / long)
 │   ├── Reference discipline (fast tier = pointers only)
 │   └── Recall modes: referential · semantic · episodic
-├── Clocking (§4)                                     [M0: monotonic log shipped; NTP pending]
+├── Clocking (§4)                                     [shipped]
 │   ├── Monotonic ordering log (doubles as episodic index)
-│   └── Scheduled NTP re-anchor
+│   └── SNTP re-anchor at run boundaries (SFMA_NTP, graceful fallback)
 ├── Runtime (§3)                                      [shipped: agent.mjs]
 │   ├── Single non-compiled file, JIT-class runtime
 │   └── Self-modification: mutable policy / immutable floor
@@ -144,10 +145,11 @@ node agent.mjs path/to/manifest.json
 node agent.mjs path/to/manifest.json --apply --task="what to do"
 ```
 
-Every run writes `.sfma/trace.jsonl` (append-only event log) and
-`.sfma/result.json` (the result record) inside the workspace, and maintains
-`.sfma/memory.json` — cross-run memory that certifies and pins proven
-configurations over repeated runs.
+Every run writes `.sfma/trace.jsonl` (append-only event log),
+`.sfma/result.json` (the result record), and `.sfma/health.md` (one-page
+rollup: status, success rates, endpoint table, last runs) inside the
+workspace, and maintains `.sfma/memory.json` — cross-run memory that
+certifies and pins proven configurations over repeated runs.
 
 Run continuously (a relay of bounded runs — each under its own budget and
 audit record; stop any time with Ctrl-C or `touch <workspace>/.sfma/HALT`):

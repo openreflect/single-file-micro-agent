@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import dgram from "node:dgram";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
@@ -60,6 +61,32 @@ const mono = () => {
   return (lastSeq = t);
 };
 
+// ---- reference clock (SPEC §4.2): SNTP re-anchor, env-gated. SFMA_NTP=1
+// uses pool.ntp.org; SFMA_NTP=host[:port] uses that server; unset or any
+// failure falls back to the system wall clock, honestly labeled.
+async function ntpTime() {
+  const cfg = process.env.SFMA_NTP;
+  if (!cfg) return { wallMs: Date.now(), source: "system-wall" };
+  const [host, port] = cfg === "1" ? ["pool.ntp.org", 123] : [cfg.split(":")[0], Number(cfg.split(":")[1] || 123)];
+  try {
+    return await new Promise((resolve, reject) => {
+      const sock = dgram.createSocket("udp4");
+      const pkt = Buffer.alloc(48);
+      pkt[0] = 0x1b;
+      const timer = setTimeout(() => { sock.close(); reject(new Error("ntp timeout")); }, 1500);
+      sock.once("message", (msg) => {
+        clearTimeout(timer); sock.close();
+        const secs = msg.readUInt32BE(40), frac = msg.readUInt32BE(44);
+        resolve({ wallMs: (secs - 2208988800) * 1000 + Math.round((frac / 2 ** 32) * 1000), source: `ntp:${host}` });
+      });
+      sock.once("error", (e) => { clearTimeout(timer); sock.close(); reject(e); });
+      sock.send(pkt, port, host);
+    });
+  } catch {
+    return { wallMs: Date.now(), source: "system-wall(ntp-failed)" };
+  }
+}
+
 // ---- trace (DEFINITIONS §1): append-only JSONL
 function openTrace(file) {
   let anchorId = "unanchored";
@@ -71,8 +98,9 @@ function openTrace(file) {
   };
   return {
     emit,
-    anchor(source) {
-      const e = emit("clock-anchor", 0, { wallMs: Date.now(), source });
+    anchor(a) {
+      const wallMs = a.wallMs ?? Date.now();
+      const e = emit("clock-anchor", 0, { wallMs, source: a.source ?? String(a), offsetMs: wallMs - Date.now() });
       anchorId = e.id;
       return e;
     },
@@ -182,16 +210,37 @@ const defaultMock = (m) => [
   { tool: "done", summary: "mock complete" },
 ];
 
-// exclude: judge independence (SPEC §5.3) — a soft-tier judgment call passes
-// the name of the endpoint that produced the judged work; it is skipped when
+// ---- the endpoint grid (SPEC §5.7, DEFINITIONS §3.3): the agent chooses
+// endpoints by score — benchmark priors + measured pass rate, availability,
+// and latency — per task class. exclude: judge independence (SPEC §5.3), a
+// soft-tier judgment skips the endpoint that produced the judged work when
 // any other endpoint is usable.
-function grid(endpoints, cls, exclude) {
-  const usable = endpoints.filter((ep) => ep.provider === "mock" || (ep.auth ? process.env[ep.auth.clientIdEnv] && process.env[ep.auth.clientSecretEnv] : process.env[KEYS[ep.provider]]));
+const ROUTING = { reasoning: { wPrior: 0.2, wPass: 0.5, wAvail: 0.2, wLat: 0.1 }, mechanical: { wPrior: 0.1, wPass: 0.3, wAvail: 0.2, wLat: 0.4 } };
+function grid(state, cls, exclude) {
+  const tun = state.manifest.tuning || {};
+  const usable = state.manifest.modelEndpoints.filter((ep) => ep.provider === "mock" || (ep.auth ? process.env[ep.auth.clientIdEnv] && process.env[ep.auth.clientSecretEnv] : process.env[KEYS[ep.provider]]));
   const independent = exclude ? usable.filter((ep) => ep.name !== exclude) : usable;
-  return (independent.length ? independent : usable).sort((a, b) => ((b.priors || {})[cls] ?? 0.5) - ((a.priors || {})[cls] ?? 0.5));
+  const pool = independent.length ? independent : usable;
+  if (pool.length <= 1) return pool; // degenerate mode: health-gating only
+  const w = (tun.routing || {})[cls] || ROUTING[cls];
+  const target = tun.targetLatencyMs ?? 4000;
+  const now = Date.now();
+  const score = (ep) => {
+    const s = state.stats[ep.name] || {};
+    if (s.downUntil && s.downUntil > now) return -1;
+    const prior = (ep.priors || {})[cls] ?? 0.5;
+    const pass = s.passRate?.[cls] ?? 0.5;
+    const avail = s.availability ?? 1;
+    const lat = s.latencyMsEwma ? Math.min(1, target / s.latencyMsEwma) : 1;
+    return w.wPrior * prior + w.wPass * pass + w.wAvail * avail + w.wLat * lat;
+  };
+  const ranked = pool.map((ep) => [score(ep), ep]).sort((a, b) => b[0] - a[0]);
+  const up = ranked.filter(([sc]) => sc >= 0).map(([, ep]) => ep);
+  return up.length ? up : pool; // all down: try anyway rather than stall
 }
 async function callModel(state, sys, msgs, cls, exclude) {
-  const ranked = grid(state.manifest.modelEndpoints, cls, exclude);
+  const alpha = state.manifest.tuning?.ewmaAlpha ?? 0.3;
+  const ranked = grid(state, cls, exclude);
   if (!ranked.length) throw new Error("no usable endpoint: no API key found and no mock configured");
   for (const ep of ranked) {
     if (state.calls >= state.budget.maxModelCalls) { state.halted = "budget"; throw new Error(`budget: maxModelCalls (${state.budget.maxModelCalls}) reached`); }
@@ -200,11 +249,17 @@ async function callModel(state, sys, msgs, cls, exclude) {
     try {
       const text = await providers[ep.provider](ep, await authHeaders(ep), sys, msgs, state);
       const ms = performance.now() - t0;
-      s.calls++; s.latencyMsEwma = s.latencyMsEwma === null ? ms : 0.3 * ms + 0.7 * s.latencyMsEwma;
+      s.calls++; s.latencyMsEwma = s.latencyMsEwma === null ? ms : alpha * ms + (1 - alpha) * s.latencyMsEwma;
+      s.availability = alpha * 1 + (1 - alpha) * (s.availability ?? 1);
+      s.consecFails = 0; s.downUntil = 0;
+      state.lastWorkEndpoint = ep.name;
       state.trace.emit("call", 1, { endpoint: ep.name, latencyMs: Math.round(ms), ok: true }, [], cls);
       return text;
     } catch (err) {
       s.calls++; s.failures++;
+      s.availability = (1 - alpha) * (s.availability ?? 1);
+      s.consecFails = (s.consecFails ?? 0) + 1;
+      if (s.consecFails >= 3) s.downUntil = Date.now() + Math.min(30000 * 2 ** (s.consecFails - 3), 600000);
       state.trace.emit("call", 1, { endpoint: ep.name, ok: false, error: String(err.message) }, [], cls);
     }
   }
@@ -270,7 +325,8 @@ async function main() {
   const ws = path.resolve(manifest.workspace);
   fs.mkdirSync(path.join(ws, ".sfma"), { recursive: true });
   const trace = openTrace(path.join(ws, ".sfma", "trace.jsonl"));
-  const firstSeq = trace.anchor("system-wall").seq;
+  const anchor0 = await ntpTime();
+  const firstSeq = trace.anchor(anchor0).seq;
   const dry = manifest.dryRunDefault && !apply;
   const task = taskFlag || manifest.taskStatement || `Produce the declared outputs (${manifest.outputs.join(", ")}) for task "${manifest.name}".`;
   // arithmetic backstop (SPEC §5.3/§8, DEFINITIONS §6): enforced here in code,
@@ -334,14 +390,44 @@ async function main() {
     const exists = dry ? state.writes.has(o) : fs.existsSync(abs);
     return { path: o, ok: exists, ...(exists && !dry && { sha256: sha256(abs) }) };
   });
-  const complete = done !== null && outputs.every((o) => o.ok) && state.hardFails === 0;
+  const tun = manifest.tuning || {};
+
+  // epsilon soft tier (SPEC §5.3): an independent quality judgment against
+  // the bootstrap's successCriteria, routed AWAY from the endpoint that did
+  // the work (judge independence). Judge unavailability never fails a run
+  // that passed the hard tier — criteria stay null, honestly.
+  let soft = "skipped", judged = null;
+  if (done !== null && state.hardFails === 0 && !dry && outputs.every((o) => o.ok) && (candidate?.successCriteria || []).length) {
+    soft = "unavailable";
+    const artifacts = Object.fromEntries(manifest.outputs.map((o) => { try { return [o, clip(fs.readFileSync(path.join(ws, o), "utf8"), 2048)]; } catch { return [o, "<unreadable>"]; } }));
+    const jSys = "You are epsilon's soft tier: an independent quality judge for a Single File Micro Agent run. Judge strictly against the stated criteria. Reply with exactly one JSON object, no prose, no fences.";
+    const jMsg = `TASK STATEMENT:\n${task}\n\nSUCCESS CRITERIA:\n${JSON.stringify(candidate.successCriteria)}\n\nPRODUCED OUTPUTS (clipped):\n${JSON.stringify(artifacts)}\n\nAgent's completion summary: ${clip(done, 500)}\n\nReply: {"criteria":[{"criterion":string,"pass":boolean,"evidence":string},...],"overallPass":boolean}`;
+    for (let attempt = 0; attempt < 2 && soft === "unavailable"; attempt++) {
+      try {
+        const jv = parseReply(await callModel(state, jSys, [{ role: "user", content: jMsg }], "reasoning", state.lastWorkEndpoint));
+        if (!Array.isArray(jv?.criteria)) continue;
+        judged = jv.criteria.map((c) => ({ criterion: String(c.criterion), pass: !!c.pass, evidence: clip(String(c.evidence ?? ""), 500) }));
+        const overall = typeof jv.overallPass === "boolean" ? jv.overallPass : judged.every((c) => c.pass);
+        for (const c of judged) trace.emit("verdict", 1, { tier: "soft", pass: c.pass, reason: c.criterion });
+        soft = overall ? "passed" : "failed";
+        const wep = state.lastWorkEndpoint && state.stats[state.lastWorkEndpoint];
+        if (wep) {
+          const alpha = tun.ewmaAlpha ?? 0.3;
+          wep.passRate ??= {};
+          wep.passRate.mechanical = alpha * (overall ? 1 : 0) + (1 - alpha) * (wep.passRate.mechanical ?? 0.5);
+        }
+      } catch (err) { trace.emit("result", 0, { softTier: String(err.message) }); break; }
+    }
+  }
+  const criteria = judged || (candidate?.successCriteria || []).map((c) => ({ criterion: c, pass: null, evidence: "" }));
+
+  const complete = done !== null && outputs.every((o) => o.ok) && state.hardFails === 0 && soft !== "failed";
   const verdict = state.halted ? `halted-${state.halted}` : done === null ? (turns >= manifest.maxTurns ? "halted-maxTurns" : "failed") : complete ? "completed" : "failed";
   trace.emit("weight", 0, state.stats);
 
   // certification statistics over the run chain (DEFINITIONS §7): pure code
   // over recorded history — no model call, no operator judgment (SPEC §5.6)
-  const tun = manifest.tuning || {};
-  memory.runs = [...memory.runs, { at: new Date().toISOString(), verdict, turns, modelCalls: state.calls, hardTierFailures: state.hardFails, dryRun: dry }].slice(-100);
+  memory.runs = [...memory.runs, { at: new Date().toISOString(), verdict, turns, modelCalls: state.calls, hardTierFailures: state.hardFails, dryRun: dry, softPass: soft === "passed" ? true : soft === "failed" ? false : null }].slice(-100);
   memory.endpoints = state.stats;
   const win = memory.runs.filter((r) => !r.dryRun).slice(-(tun.certWindow ?? 20));
   const passRate = win.length ? win.filter((r) => r.verdict === "completed").length / win.length : 0;
@@ -357,20 +443,51 @@ async function main() {
   fs.writeFileSync(memPath, JSON.stringify(memory, null, 2));
 
   trace.emit("lifecycle", 0, { from: replay ? "pinned-replay" : "probation", to: verdict });
-  const lastAnchor = trace.anchor("system-wall");
+  const lastAnchor = trace.anchor(await ntpTime());
 
   const record = {
     manifest, genesisVersion: GENESIS_VERSION,
     bootstrap: candidate, lifecycle: [replay ? "pinned-replay" : "probation", ...(transition ? [transition] : []), verdict],
     memory: { runs: memory.runs.length, pinned: !!memory.pinned },
-    outputs, criteria: (candidate?.successCriteria || []).map((c) => ({ criterion: c, pass: null, evidence: [] })),
+    outputs, criteria, softTier: soft,
     weights: state.stats, mutations: { count: 0, refs: [] },
-    clock: { firstSeq, lastSeq: lastAnchor.seq, anchorSource: "system-wall (NTP re-anchor is post-M0)" },
+    clock: { firstSeq, lastSeq: lastAnchor.seq, anchorSource: anchor0.source },
     trace: ".sfma/trace.jsonl", dryRun: dry, turns, modelCalls: state.calls, budget, hardTierFailures: state.hardFails, verdict,
   };
   fs.writeFileSync(path.join(ws, ".sfma", "result.json"), JSON.stringify(record, null, 2));
+  writeHealth(ws, memory, record);
   console.log(`${verdict.toUpperCase()} turns=${turns} dryRun=${dry} record=${path.join(manifest.workspace, ".sfma", "result.json")}`);
   return verdict === "completed" ? 0 : 1;
+}
+
+// ---- health report: the one-page answer to "how has this been going?"
+// Pure code over recorded history, rewritten after every run.
+function writeHealth(ws, memory, rec) {
+  const real = memory.runs.filter((r) => !r.dryRun);
+  const win = real.slice(-20);
+  const pct = (a, b) => (b ? Math.round((100 * a) / b) + "%" : "n/a");
+  const comp = (rs) => rs.filter((r) => r.verdict === "completed").length;
+  const softed = (rs) => rs.filter((r) => r.softPass !== null && r.softPass !== undefined);
+  const lines = [
+    `# Health — ${rec.manifest.name}`, "",
+    `Updated: ${new Date().toISOString()}`, "",
+    `**Status:** ${memory.pinned ? `PINNED (certified ${memory.pinned.certifiedAt})` : "PROBATION"} · last run: ${rec.verdict}${rec.dryRun ? " (dry)" : ""} · soft tier: ${rec.softTier}`, "",
+    `| metric | window (${win.length}) | lifetime (${real.length}) |`,
+    `|---|---|---|`,
+    `| completion | ${pct(comp(win), win.length)} | ${pct(comp(real), real.length)} |`,
+    `| soft-tier pass | ${pct(softed(win).filter((r) => r.softPass).length, softed(win).length)} | ${pct(softed(real).filter((r) => r.softPass).length, softed(real).length)} |`,
+    `| hard-tier violations | ${win.reduce((n, r) => n + r.hardTierFailures, 0)} | ${real.reduce((n, r) => n + r.hardTierFailures, 0)} |`,
+    `| model calls | ${win.reduce((n, r) => n + r.modelCalls, 0)} | ${real.reduce((n, r) => n + r.modelCalls, 0)} |`, "",
+    `## Endpoints`,
+    `| endpoint | calls | fail% | latency | avail | pass(mech) |`,
+    `|---|---|---|---|---|---|`,
+    ...Object.entries(memory.endpoints).map(([n, s]) =>
+      `| ${n} | ${s.calls} | ${pct(s.failures, s.calls)} | ${s.latencyMsEwma ? Math.round(s.latencyMsEwma) + "ms" : "—"} | ${(s.availability ?? 1).toFixed(2)} | ${(s.passRate?.mechanical ?? 0.5).toFixed(2)} |`),
+    "",
+    `## Last 5 runs`,
+    ...memory.runs.slice(-5).map((r) => `- ${r.at} — ${r.verdict}, ${r.modelCalls} calls${r.dryRun ? " (dry)" : ""}${r.softPass === false ? " · soft-tier FAIL" : ""}`),
+  ];
+  fs.writeFileSync(path.join(ws, ".sfma", "health.md"), lines.join("\n") + "\n");
 }
 
 main().then((code) => process.exit(code), (err) => { console.error(`FATAL: ${err.message}`); process.exit(1); });
