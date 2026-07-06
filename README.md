@@ -49,11 +49,12 @@ single-file-micro-agent
 │   ├── Resource budget floor (§5.3/§8)               [shipped: pre-M1 gates]
 │   │   ├── maxModelCalls · maxSeconds · maxLoops · maxPendingTasks
 │   │   └── Operator halt: SIGINT/SIGTERM or .sfma/HALT → halted-operator
-│   └── Result record                                 [shipped: M0]
-│       ├── Emergent configuration capture
-│       ├── Re-anchored event ordering
-│       ├── Lifecycle transitions + mutation traces
-│       └── Endpoint weight snapshots
+│   ├── Result record                                 [shipped: M0]
+│   │   ├── Emergent configuration capture
+│   │   ├── Re-anchored event ordering
+│   │   ├── Lifecycle transitions + mutation traces
+│   │   └── Endpoint weight snapshots
+│   └── Health rollup (.sfma/health.json + HEALTH.md) [shipped]
 ├── Decision core — the flywheel (§5)                 [M0: single-loop floor shipped]
 │   ├── Genesis prompt                                [drafted: prompts/genesis.prompt.md]
 │   ├── Bootstrap → emergent configuration (§5.4)
@@ -61,13 +62,12 @@ single-file-micro-agent
 │   │   └── Each loop = instantiated LLM conversation
 │   ├── Epsilon — replicated governor (§5.3)
 │   │   ├── Hard tier: deterministic manifest floor (immutable)
-│   │   └── Soft tier: independent quality judge          [shipped]
-│   │       └── Judge never routes to the endpoint that did the work
+│   │   └── Soft tier: per-criterion judge, judge independence [shipped]
 │   ├── Configuration lifecycle (§5.6)                [shipped: run-level pinning]
 │   │   └── Probation → statistical certification → pinning → demotion
-│   └── Endpoint weight grid (§5.7)                   [shipped: live scoring]
-│       ├── Self-chosen distribution across endpoints, per task class
-│       └── Priors + measured pass/availability/latency; down detection + backoff
+│   └── Endpoint weight grid (§5.7)                   [shipped: self-selecting]
+│       ├── Priors + judged pass rate + availability drive routing
+│       └── Trace-to-weight: benchmark priors + measured latency/availability/pass-fail
 ├── Memory & communication (§6)                       [M0.5: cross-run memory shipped]
 │   ├── Cross-run memory — recall + pinning (.sfma/memory.json)
 │   ├── Blackboard medium — the only inter-loop channel
@@ -76,7 +76,7 @@ single-file-micro-agent
 │   └── Recall modes: referential · semantic · episodic
 ├── Clocking (§4)                                     [shipped]
 │   ├── Monotonic ordering log (doubles as episodic index)
-│   └── SNTP re-anchor at run boundaries (SFMA_NTP, graceful fallback)
+│   └── NTP re-anchor (opt-in: tuning.ntpAnchor, wall-clock fallback)
 ├── Runtime (§3)                                      [shipped: agent.mjs]
 │   ├── Single non-compiled file, JIT-class runtime
 │   └── Self-modification: mutable policy / immutable floor
@@ -86,12 +86,14 @@ single-file-micro-agent
     └── Public generic upstream · private forks hold keys, logs, observer
 ```
 
-M0 is shipped: [agent.mjs](agent.mjs) (321 lines, Node ≥ 18 or Deno, zero
+Shipped today: [agent.mjs](agent.mjs) (451 lines, Node ≥ 18 or Deno, zero
 dependencies) runs a single loop under the full containment floor — manifest
-enforcement, dry-run, append-only trace, result record — verified offline by
+enforcement, budgets, dry-run, append-only trace, result record — plus the
+epsilon soft tier (independent per-criterion judging), self-selecting
+endpoint routing, cross-run memory with certification/pinning, health
+rollups, and opt-in NTP anchoring; verified offline by
 [tests/test_m0.py](tests/test_m0.py) via the deterministic mock provider.
-Multi-loop bootstrap, epsilon soft tier, lifecycle, and the live weight grid
-are M1+.
+Multi-loop bootstrap (the M1 flywheel) is the main unbuilt piece.
 
 ## Design principles
 
@@ -145,11 +147,10 @@ node agent.mjs path/to/manifest.json
 node agent.mjs path/to/manifest.json --apply --task="what to do"
 ```
 
-Every run writes `.sfma/trace.jsonl` (append-only event log),
-`.sfma/result.json` (the result record), and `.sfma/health.md` (one-page
-rollup: status, success rates, endpoint table, last runs) inside the
-workspace, and maintains `.sfma/memory.json` — cross-run memory that
-certifies and pins proven configurations over repeated runs.
+Every run writes `.sfma/trace.jsonl` (append-only event log) and
+`.sfma/result.json` (the result record) inside the workspace, and maintains
+`.sfma/memory.json` — cross-run memory that certifies and pins proven
+configurations over repeated runs.
 
 Run continuously (a relay of bounded runs — each under its own budget and
 audit record; stop any time with Ctrl-C or `touch <workspace>/.sfma/HALT`):
