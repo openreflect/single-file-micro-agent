@@ -143,6 +143,27 @@ class M0Test(unittest.TestCase):
         self.assertEqual(rec["verdict"], "halted-maxTurns")
         self.assertEqual(rec["turns"], 4)
 
+    def test_budget_max_model_calls_halts(self):
+        script = [CANDIDATE] + [{"tool": "read", "path": "nope.txt"}] * 20
+        r = self.run_agent(self.manifest(maxTurns=50, maxModelCalls=3), script)
+        self.assertEqual(r.returncode, 1)
+        rec = self.record()
+        self.assertEqual(rec["verdict"], "halted-budget")
+        self.assertEqual(rec["modelCalls"], 3)
+        self.assertEqual(rec["budget"]["maxModelCalls"], 3)
+
+    def test_operator_halt_sentinel(self):
+        (self.ws / ".sfma").mkdir()
+        (self.ws / ".sfma" / "HALT").write_text("")
+        script = [CANDIDATE, {"tool": "done", "summary": "never reached"}]
+        r = self.run_agent(self.manifest(), script)
+        self.assertEqual(r.returncode, 1)
+        rec = self.record()
+        self.assertEqual(rec["verdict"], "halted-operator")
+        self.assertEqual(rec["modelCalls"], 0)
+        halts = [t for t in self.traces() if t["kind"] == "result" and "halt" in t["data"]]
+        self.assertIn("HALT", halts[0]["data"]["halt"])
+
     def test_invalid_manifest_rejected(self):
         p = self.manifest()
         p.write_text(json.dumps({"name": "bad", "modelAdapter": "v1"}))

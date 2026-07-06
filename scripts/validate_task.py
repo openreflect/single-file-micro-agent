@@ -26,6 +26,13 @@ AUTH_REQUIRED = {"type": str, "tokenUrl": str, "clientIdEnv": str, "clientSecret
 AUTH_OPTIONAL = {"scope": str}
 AUTH_TYPES = {"oauth2-client-credentials"}
 
+BUDGET_FIELDS = {
+    "maxModelCalls": (1, 100_000),
+    "maxSeconds": (1, 86_400),
+    "maxLoops": (1, 16),
+    "maxPendingTasks": (1, 4_096),
+}
+
 TUNING_KEYS = {
     "ewmaAlpha": (0.0, 1.0),
     "targetLatencyMs": (1, 600_000),
@@ -124,6 +131,14 @@ def main() -> int:
 
     if "taskStatement" in data and not isinstance(data["taskStatement"], str):
         errors.append("taskStatement must be a string")
+
+    for field, (low, high) in BUDGET_FIELDS.items():
+        if field in data and (not isinstance(data[field], (int, float)) or isinstance(data[field], bool)
+                              or not low <= data[field] <= high):
+            errors.append(f"{field} must be a number in [{low}, {high}]")
+
+    if "allowSelfModification" in data and not isinstance(data["allowSelfModification"], bool):
+        errors.append("allowSelfModification must be a boolean")
 
     if isinstance(data.get("modelEndpoints"), list):
         check_endpoints(data["modelEndpoints"], errors)

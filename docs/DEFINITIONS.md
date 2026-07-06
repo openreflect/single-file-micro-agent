@@ -44,7 +44,7 @@ One JSON document per run, assembled by the floor at exit (any exit path).
 | `mutations` | Count and `refs` of all self-modifications |
 | `clock` | First/last `seq`, all anchor points |
 | `trace` | Path/pointer to the full JSONL trace |
-| `verdict` | `completed` \| `failed` \| `halted-maxTurns` \| `halted-operator` |
+| `verdict` | `completed` \| `failed` \| `halted-maxTurns` \| `halted-budget` \| `halted-operator` |
 
 ## 3. Endpoint grid
 
@@ -130,6 +130,10 @@ configured, scoring is bypassed and only health-gating applies. Loops may
 propose weight-vector adjustments as ordinary tasks; epsilon judges them like
 any other work (§5.7).
 
+**Judge independence (SPEC §5.3):** a soft-tier judgment call excludes the
+endpoint that produced the work under judgment whenever another endpoint is
+usable — no endpoint approves its own output.
+
 ## 4. Certification statistics (§5.6)
 
 Computed deterministically over the trailing window
@@ -152,3 +156,20 @@ New optional field `tuning` (object) holds: `ewmaAlpha`, `targetLatencyMs`,
 `routing` (per-class weight vectors), `certWindow`, `certCompletion`,
 `certPass`, `demotePass`. Unknown `tuning` keys are a validation error.
 All other v1 fields are unchanged.
+
+## 6. Resource budget (the arithmetic backstop, SPEC §5.3/§8)
+
+Optional manifest fields, enforced by pure code on every cycle; exceeding any
+halts the run with verdict `halted-budget`. Defaults apply when absent:
+
+| Field | Default | Range |
+|-------|---------|-------|
+| `maxModelCalls` | `maxTurns × 8` | 1..100000 (counts every attempt, failovers included) |
+| `maxSeconds` | **900** | 1..86400 (wall clock) |
+| `maxLoops` | **3** (M0 runs 1) | 1..16 |
+| `maxPendingTasks` | **32** | 1..4096 |
+| `allowSelfModification` | **false** | bool — code mutation additionally requires a detected observer (SPEC §3) |
+
+Operator halt: SIGINT/SIGTERM to the process, or creating `.sfma/HALT` inside
+the workspace, drains the run and records verdict `halted-operator`. The
+trace records which gate fired and why.
