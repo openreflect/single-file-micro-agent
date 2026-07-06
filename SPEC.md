@@ -51,15 +51,23 @@ first for the second.
   clocking, API client — lives in one file. External dependencies are avoided;
   where the host provides a capability (clock, socket, storage), the agent
   enumerates and uses it rather than bundling its own.
-- **Self-modification — mutable policy, immutable floor.** The agent may
-  rewrite anything above the containment floor at runtime: loop topology,
-  schedules, prompts, endpoint weights, memory placement, even its own dispatch
-  code. The floor itself — epsilon's hard tier (§5.3), manifest enforcement
-  (§8), and boundary I/O (§7) — is immutable for the life of a run. This is the
-  application-delivery-controller discipline: policy is fluid, the enforcement
-  engine is fixed. Every mutation is written through the medium (§5.2) as a
-  clock-stamped trace (§4), never applied in the dark, so the result record can
-  state what the agent's running form was at every point in the timeline.
+- **Self-modification — mutable policy, immutable floor.** The mutable surface
+  is **policy data**: loop topology, schedules, prompts, endpoint weights,
+  memory placement. The floor itself — epsilon's hard tier (§5.3), manifest
+  enforcement (§8), and boundary I/O (§7) — is immutable for the life of a
+  run. This is the application-delivery-controller discipline: policy is
+  fluid, the enforcement engine is fixed. Every mutation is written through
+  the medium (§5.2) as a clock-stamped trace (§4), never applied in the dark,
+  so the result record can state what the agent's running form was at every
+  point in the timeline.
+- **Code mutation is gated, and currently unimplemented.** Rewriting running
+  *code* (as opposed to policy data) requires BOTH `allowSelfModification:
+  true` in the manifest (default false) AND a detected external observer
+  (§7). Until an observer protocol exists, code mutation stays out of every
+  milestone. Corollary — **density is earned by observability**: the
+  "opaque by optimization" stance (§2) applies only once the §7 observer
+  exists; until then the interior stays legible, and at M0/M1 scale the
+  trace file itself is the observer interface.
 
 ## 4. Clocking — dual-clock model
 
@@ -152,6 +160,15 @@ continuously decides whether work persists — the project's key function.
 - **Persistence is the verdict.** A task, schedule, or loop persists only while
   it passes epsilon. Disagreement between loops is resolved the same way: the
   contested work is judged, and it persists or it does not.
+- **Judge independence.** A soft-tier judgment MUST NOT route to the endpoint
+  that produced the work being judged, whenever more than one endpoint is
+  usable (§5.7). No endpoint approves its own output.
+- **The governor has an arithmetic backstop.** Epsilon is a model-driven
+  control; the floor behind it is not. The manifest's resource budget (§8:
+  `maxModelCalls`, `maxSeconds`, `maxLoops`, `maxPendingTasks`, `maxTurns`)
+  is enforced by pure code and halts the run (`halted-budget`) regardless of
+  what any loop or judgment concludes. Every model-driven capability ships
+  with its deterministic cap already in place.
 
 Because the hard tier is anchored to the human-authored manifest — not to
 anything the agent generated — a badly-formed bootstrap can make a run *fail*,
@@ -318,9 +335,18 @@ Each run is governed by a **task manifest** declaring, at minimum (see
 | `dryRunDefault` | Default to dry-run; public examples use synthetic fixtures |
 | `taskStatement` | *(optional)* Operator's stated work, fed verbatim to the genesis prompt |
 | `tuning` | *(optional)* Overrides for routing weights, EWMA, and certification thresholds — [docs/DEFINITIONS.md](docs/DEFINITIONS.md) |
+| `maxModelCalls` | *(optional)* Hard cap on model call attempts; default `maxTurns × 8` |
+| `maxSeconds` | *(optional)* Hard wall-clock cap for the run; default 900 |
+| `maxLoops` | *(optional)* Ceiling on concurrent loops (floor 3 at M1); default 3 |
+| `maxPendingTasks` | *(optional)* Ceiling on queued flywheel tasks; default 32 |
+| `allowSelfModification` | *(optional)* Default false; see §3 code-mutation gate |
 
 Schema v2 replaces v1's `modelAdapter` with `modelEndpoints`; the validator
-rejects v1 manifests with a migration message.
+rejects v1 manifests with a migration message. The budget fields form the
+arithmetic backstop of §5.3: exceeding any of them halts the run with verdict
+`halted-budget`, by code, regardless of loop or epsilon state. An operator
+halt (SIGINT/SIGTERM, or creating `.sfma/HALT` in the workspace) drains the
+run and records verdict `halted-operator`.
 
 The allowlist is exhaustive: a command not named in `allowedCommands` cannot be
 run. The workspace is the only filesystem region a run may touch. These are

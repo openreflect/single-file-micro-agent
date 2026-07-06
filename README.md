@@ -46,6 +46,9 @@ single-file-micro-agent
 │   ├── Manifest validator                            [shipped: validate_task.py]
 │   ├── Co-developed disambiguation (§5.5)            [specified]
 │   │   └── Restriction-only clarifications, operator-gated expansion
+│   ├── Resource budget floor (§5.3/§8)               [shipped: pre-M1 gates]
+│   │   ├── maxModelCalls · maxSeconds · maxLoops · maxPendingTasks
+│   │   └── Operator halt: SIGINT/SIGTERM or .sfma/HALT → halted-operator
 │   └── Result record                                 [shipped: M0]
 │       ├── Emergent configuration capture
 │       ├── Re-anchored event ordering

@@ -182,14 +182,20 @@ const defaultMock = (m) => [
   { tool: "done", summary: "mock complete" },
 ];
 
-function grid(endpoints, cls) {
+// exclude: judge independence (SPEC §5.3) — a soft-tier judgment call passes
+// the name of the endpoint that produced the judged work; it is skipped when
+// any other endpoint is usable.
+function grid(endpoints, cls, exclude) {
   const usable = endpoints.filter((ep) => ep.provider === "mock" || (ep.auth ? process.env[ep.auth.clientIdEnv] && process.env[ep.auth.clientSecretEnv] : process.env[KEYS[ep.provider]]));
-  return usable.sort((a, b) => ((b.priors || {})[cls] ?? 0.5) - ((a.priors || {})[cls] ?? 0.5));
+  const independent = exclude ? usable.filter((ep) => ep.name !== exclude) : usable;
+  return (independent.length ? independent : usable).sort((a, b) => ((b.priors || {})[cls] ?? 0.5) - ((a.priors || {})[cls] ?? 0.5));
 }
-async function callModel(state, sys, msgs, cls) {
-  const ranked = grid(state.manifest.modelEndpoints, cls);
+async function callModel(state, sys, msgs, cls, exclude) {
+  const ranked = grid(state.manifest.modelEndpoints, cls, exclude);
   if (!ranked.length) throw new Error("no usable endpoint: no API key found and no mock configured");
   for (const ep of ranked) {
+    if (state.calls >= state.budget.maxModelCalls) { state.halted = "budget"; throw new Error(`budget: maxModelCalls (${state.budget.maxModelCalls}) reached`); }
+    state.calls++;
     const t0 = performance.now(), s = (state.stats[ep.name] ??= { calls: 0, failures: 0, latencyMsEwma: null });
     try {
       const text = await providers[ep.provider](ep, await authHeaders(ep), sys, msgs, state);
@@ -267,7 +273,14 @@ async function main() {
   const firstSeq = trace.anchor("system-wall").seq;
   const dry = manifest.dryRunDefault && !apply;
   const task = taskFlag || manifest.taskStatement || `Produce the declared outputs (${manifest.outputs.join(", ")}) for task "${manifest.name}".`;
-  const state = { manifest, ws, dry, trace, stats: {}, writes: new Map(), hardFails: 0 };
+  // arithmetic backstop (SPEC §5.3/§8, DEFINITIONS §6): enforced here in code,
+  // regardless of anything a loop or judgment concludes
+  const budget = { maxModelCalls: manifest.maxModelCalls ?? manifest.maxTurns * 8, maxSeconds: manifest.maxSeconds ?? 900, maxLoops: manifest.maxLoops ?? 3, maxPendingTasks: manifest.maxPendingTasks ?? 32 };
+  const deadline = Date.now() + budget.maxSeconds * 1000;
+  const state = { manifest, ws, dry, trace, stats: {}, writes: new Map(), hardFails: 0, calls: 0, budget, halted: null };
+  let signal = null;
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => (signal = sig));
+  const haltFile = path.join(ws, ".sfma", "HALT");
   trace.emit("lifecycle", 0, { from: null, to: "probation" });
 
   const sys = genesis(1, 1, manifest, task, dry);
@@ -275,6 +288,16 @@ async function main() {
   let candidate = null, done = null, turns = 0;
 
   while (turns < manifest.maxTurns) {
+    if (signal || fs.existsSync(haltFile)) {
+      state.halted = "operator";
+      trace.emit("result", 0, { halt: signal || ".sfma/HALT" });
+      break;
+    }
+    if (Date.now() > deadline) {
+      state.halted = "budget";
+      trace.emit("result", 0, { halt: `budget: maxSeconds (${budget.maxSeconds}) reached` });
+      break;
+    }
     turns++;
     let text;
     try { text = await callModel(state, sys, msgs, candidate ? "mechanical" : "reasoning"); }
@@ -300,7 +323,7 @@ async function main() {
     return { path: o, ok: exists, ...(exists && !dry && { sha256: sha256(abs) }) };
   });
   const complete = done !== null && outputs.every((o) => o.ok) && state.hardFails === 0;
-  const verdict = done === null ? (turns >= manifest.maxTurns ? "halted-maxTurns" : "failed") : complete ? "completed" : "failed";
+  const verdict = state.halted ? `halted-${state.halted}` : done === null ? (turns >= manifest.maxTurns ? "halted-maxTurns" : "failed") : complete ? "completed" : "failed";
   trace.emit("weight", 0, state.stats);
   trace.emit("lifecycle", 0, { from: "probation", to: verdict });
   const lastAnchor = trace.anchor("system-wall");
@@ -311,7 +334,7 @@ async function main() {
     outputs, criteria: (candidate?.successCriteria || []).map((c) => ({ criterion: c, pass: null, evidence: [] })),
     weights: state.stats, mutations: { count: 0, refs: [] },
     clock: { firstSeq, lastSeq: lastAnchor.seq, anchorSource: "system-wall (NTP re-anchor is post-M0)" },
-    trace: ".sfma/trace.jsonl", dryRun: dry, turns, hardTierFailures: state.hardFails, verdict,
+    trace: ".sfma/trace.jsonl", dryRun: dry, turns, modelCalls: state.calls, budget, hardTierFailures: state.hardFails, verdict,
   };
   fs.writeFileSync(path.join(ws, ".sfma", "result.json"), JSON.stringify(record, null, 2));
   console.log(`${verdict.toUpperCase()} turns=${turns} dryRun=${dry} record=${path.join(manifest.workspace, ".sfma", "result.json")}`);
