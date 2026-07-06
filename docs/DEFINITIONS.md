@@ -173,3 +173,31 @@ halts the run with verdict `halted-budget`. Defaults apply when absent:
 Operator halt: SIGINT/SIGTERM to the process, or creating `.sfma/HALT` inside
 the workspace, drains the run and records verdict `halted-operator`. The
 trace records which gate fired and why.
+
+## 7. Cross-run memory (`.sfma/memory.json`)
+
+The long-term tier at M0.5 scale: one JSON file per workspace, read at
+startup (recall) and updated at exit. Extended autonomy is a **chain of
+bounded runs** — `scripts/run_chain.mjs` relays them; memory carries what was
+learned between them.
+
+| Field | Meaning |
+|-------|---------|
+| `runs` | Trailing run summaries (verdict, turns, modelCalls, hardTierFailures, dryRun); capped at 100 |
+| `pinned` | Certified bootstrap candidate + genesis version, or `null` |
+| `endpoints` | Lifetime endpoint profiles (calls, failures, latency EWMA) — seeds the grid on the next run |
+
+**Recall:** endpoint profiles seed routing; if `pinned` exists (and matches
+the current genesis version), the run **replays** the certified configuration
+— lifecycle starts at `pinned-replay`, bootstrap drafting is skipped, and the
+first model call is work, not drafting.
+
+**Certification (run-level, until the soft tier lands):** computed by pure
+code over the trailing `certWindow` (default 20) non-dry runs — certify and
+pin when the window is full, completion rate ≥ `certCompletion` (0.90), and
+hard-tier violations are zero across the window. **Demotion:** any hard-tier
+violation in a pinned run demotes immediately; completion rate below
+`demotePass` (0.60) over the window also demotes. Demoted workspaces
+re-emerge from probation on the next run. Dry runs are recorded but excluded
+from certification statistics. Every transition is a `lifecycle` trace and
+appears in the result record.

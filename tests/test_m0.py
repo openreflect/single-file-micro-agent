@@ -164,6 +164,67 @@ class M0Test(unittest.TestCase):
         halts = [t for t in self.traces() if t["kind"] == "result" and "halt" in t["data"]]
         self.assertIn("HALT", halts[0]["data"]["halt"])
 
+    def test_cross_run_memory_certifies_and_pins(self):
+        script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
+                  {"tool": "done", "summary": "ok"}]
+        m = self.manifest(tuning={"certWindow": 2})
+        r1 = self.run_agent(m, script)
+        self.assertEqual(r1.returncode, 0, r1.stdout + r1.stderr)
+        mem = json.loads((self.ws / ".sfma" / "memory.json").read_text())
+        self.assertEqual(len(mem["runs"]), 1)
+        self.assertIsNone(mem["pinned"])
+        r2 = self.run_agent(m, script)
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        mem = json.loads((self.ws / ".sfma" / "memory.json").read_text())
+        self.assertEqual(len(mem["runs"]), 2)
+        self.assertEqual(mem["pinned"]["candidate"]["mission"], CANDIDATE["mission"])
+        self.assertIn("certified", self.record()["lifecycle"])
+
+    def test_pinned_replay_skips_bootstrap(self):
+        pin = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
+               {"tool": "done", "summary": "ok"}]
+        m = self.manifest(tuning={"certWindow": 2})
+        self.run_agent(m, pin)
+        self.run_agent(m, pin)
+        replay = [{"tool": "write", "path": "result.json", "content": "replayed"},
+                  {"tool": "done", "summary": "ok"}]
+        r3 = self.run_agent(m, replay)
+        self.assertEqual(r3.returncode, 0, r3.stdout + r3.stderr)
+        rec = self.record()
+        self.assertEqual(rec["lifecycle"][0], "pinned-replay")
+        self.assertEqual(rec["bootstrap"]["mission"], CANDIDATE["mission"])
+        self.assertEqual(rec["modelCalls"], 2)
+        self.assertEqual((self.ws / "result.json").read_text(), "replayed")
+
+    def test_demotion_on_hard_violation(self):
+        pin = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
+               {"tool": "done", "summary": "ok"}]
+        m = self.manifest(tuning={"certWindow": 2})
+        self.run_agent(m, pin)
+        self.run_agent(m, pin)
+        bad = [{"tool": "write", "path": "../evil.txt", "content": "x"},
+               {"tool": "done", "summary": "tried"}]
+        r3 = self.run_agent(m, bad)
+        self.assertEqual(r3.returncode, 1)
+        rec = self.record()
+        self.assertIn("demoted", rec["lifecycle"])
+        self.assertFalse(rec["memory"]["pinned"])
+        mem = json.loads((self.ws / ".sfma" / "memory.json").read_text())
+        self.assertIsNone(mem["pinned"])
+
+    def test_run_chain_relay(self):
+        script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
+                  {"tool": "done", "summary": "ok"}]
+        m = self.manifest()
+        env = {**os.environ, "SFMA_MOCK": json.dumps(script)}
+        r = subprocess.run(["node", str(REPO / "scripts" / "run_chain.mjs"), str(m),
+                            "--every=0", "--max-runs=2", "--apply"],
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("chain: run 2/2", r.stdout)
+        mem = json.loads((self.ws / ".sfma" / "memory.json").read_text())
+        self.assertEqual(len(mem["runs"]), 2)
+
     def test_invalid_manifest_rejected(self):
         p = self.manifest()
         p.write_text(json.dumps({"name": "bad", "modelAdapter": "v1"}))
