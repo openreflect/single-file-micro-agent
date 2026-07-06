@@ -53,7 +53,30 @@ One JSON document per run, assembled by the floor at exit (any exit path).
 Configured in the manifest (`modelEndpoints`, 1..n entries; 3 is the target —
 OpenAI, Gemini, Anthropic — 1 is a supported degenerate mode). Per endpoint:
 `name`, `provider`, `model`, optional `baseUrl`, optional `priors`
-(`{reasoning: 0..1, mechanical: 0..1}`, benchmark-derived; default `0.5`).
+(`{reasoning: 0..1, mechanical: 0..1}`, benchmark-derived; default `0.5`),
+optional `auth`.
+
+**Auth.** Default is a provider API key from env (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `GEMINI_API_KEY`). An endpoint may instead declare
+machine OAuth:
+
+```json
+"auth": {
+  "type": "oauth2-client-credentials",
+  "tokenUrl": "https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token",
+  "clientIdEnv": "AZ_OPENAI_CLIENT_ID",
+  "clientSecretEnv": "AZ_OPENAI_CLIENT_SECRET",
+  "scope": "https://cognitiveservices.azure.com/.default"
+}
+```
+
+Tokens are fetched, cached per endpoint, and refreshed 60s before expiry; a
+token failure counts as an endpoint transport failure (failover applies). The
+manifest names env variables, never secret values (SPEC §10). Interactive
+OAuth flows (browser sign-in) are deliberately unsupported: an autonomous run
+cannot block on a human. The example above pairs with
+`baseUrl: "https://<resource>.openai.azure.com/openai"` for Azure OpenAI's
+v1-compatible route; any OAuth2-fronted gateway works the same way.
 
 ### 3.2 Measured state (EWMA, α = `tuning.ewmaAlpha`, default **0.3**)
 
