@@ -35,6 +35,55 @@ The runner should be boring by design: small manifests, clear permissions, synth
 - Result records.
 - Public-safe fixture runs.
 
+## Feature tree
+
+Section references (§) point into [SPEC.md](SPEC.md), the full architecture.
+
+```text
+single-file-micro-agent
+├── Containment contract (§8)                        [partially shipped]
+│   ├── Task manifest schema                          [shipped: example fixture]
+│   ├── Manifest validator                            [shipped: validate_task.py]
+│   ├── Co-developed disambiguation (§5.5)            [specified]
+│   │   └── Restriction-only clarifications, operator-gated expansion
+│   └── Result record                                 [specified]
+│       ├── Emergent configuration capture
+│       ├── Re-anchored event ordering
+│       ├── Lifecycle transitions + mutation traces
+│       └── Endpoint weight snapshots
+├── Decision core — the flywheel (§5)                 [specified]
+│   ├── Genesis prompt                                [OPEN — not yet designed]
+│   ├── Bootstrap → emergent configuration (§5.4)
+│   ├── Worker loops (≥3, async, dynamic)
+│   │   └── Each loop = instantiated LLM conversation
+│   ├── Epsilon — replicated governor (§5.3)
+│   │   ├── Hard tier: deterministic manifest floor (immutable)
+│   │   └── Soft tier: mission adherence, 1..N model calls
+│   ├── Configuration lifecycle (§5.6)
+│   │   └── Probation → statistical certification → pinning → demotion
+│   └── Endpoint weight grid (§5.7)
+│       ├── ≥3 LLM API endpoints, self-determined weights
+│       └── Trace-to-weight: benchmark priors + measured latency/availability/pass-fail
+├── Memory & communication (§6)                       [specified]
+│   ├── Blackboard medium — the only inter-loop channel
+│   ├── Tiers placed by measured latency (short / medium / long)
+│   ├── Reference discipline (fast tier = pointers only)
+│   └── Recall modes: referential · semantic · episodic
+├── Clocking (§4)                                     [specified]
+│   ├── Monotonic ordering log (doubles as episodic index)
+│   └── Scheduled NTP re-anchor
+├── Runtime (§3)                                      [specified]
+│   ├── Single non-compiled file, JIT-class runtime
+│   └── Self-modification: mutable policy / immutable floor
+├── Observability (§7)                                [external, out of scope]
+│   └── Invariant: no unobserved path to model, tools, or memory
+└── Public/private split (§10)
+    └── Public generic upstream · private forks hold keys, logs, observer
+```
+
+Only the manifest schema and validator exist as code today; everything else is
+specified but unbuilt, and the genesis prompt is the one node that is neither.
+
 ## Design principles
 
 - One task, one bounded workspace, one result record.

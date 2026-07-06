@@ -2,11 +2,11 @@
 
 ## Summary
 
-Single File Micro Agent is a small public framework for bounded autonomous worker runs. It starts with task manifests and deterministic validation before adding model adapters and execution loops.
+Single File Micro Agent is a small public framework for bounded, authorized agent runs on systems the operator owns. It starts with task manifests and deterministic validation before adding model adapters and execution loops. See [SPEC.md](SPEC.md) for the full architecture.
 
 ## Problem
 
-Full agent systems are useful, but they can be too heavy for small repeatable tasks. A public pattern is needed for tiny autonomous agents that can operate in a constrained workspace with explicit permissions and durable outputs.
+Full agent systems are useful, but they can be too heavy for small repeatable tasks. A public pattern is needed for tiny autonomous agents that operate in a constrained workspace on an authorized host, with explicit permissions and durable, auditable outputs.
 
 ## Goals
 
@@ -19,6 +19,8 @@ Full agent systems are useful, but they can be too heavy for small repeatable ta
 ## Non-goals
 
 - Providing unrestricted shell access.
+- Running on, or reaching, systems the operator does not own or is not authorized to use.
+- Any operation the observable boundary cannot see, or any action outside the declared workspace and command allowlist.
 - Encoding private deployment paths.
 - Replacing larger agent runtimes.
 - Hiding model/provider behavior behind vague abstractions.
@@ -33,7 +35,12 @@ Full agent systems are useful, but they can be too heavy for small repeatable ta
 ## Future scope
 
 - Single-file runner.
+- Asynchronous multi-loop flywheel core, governed by a two-tier epsilon judge (SPEC §5).
+- Configuration lifecycle: probation, statistical certification from traces, pinning (SPEC §5.6).
+- Endpoint weight grid: self-tuned weighted access across a minimum of 3 LLM API endpoints (SPEC §5.7).
+- Dual-clock record: monotonic ordering plus scheduled NTP re-anchor (SPEC §4).
+- Tiered, type-agnostic, self-profiling memory (SPEC §6).
 - Provider adapter interface.
 - Dry-run and apply modes.
-- Result log format.
+- Result log format, capturing emergent configuration and event ordering.
 - Minimal test harness for command policy enforcement.
