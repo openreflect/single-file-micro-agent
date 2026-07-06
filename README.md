@@ -164,8 +164,13 @@ and questions to the outbox via `notify`/`ask` without ever blocking; your
 replies land in the inbox and reach it on its next run):
 
 ```bash
-node scripts/chat.mjs path/to/workspace
+node scripts/chat.mjs path/to/workspace              # terminal chat
+node scripts/telegram_bridge.mjs path/to/workspace   # phone chat via a Telegram bot
 ```
+
+The Telegram bridge needs `TELEGRAM_BOT_TOKEN` (from @BotFather) and
+`TELEGRAM_CHAT_ID` (run once without it — discovery mode prints yours);
+messages from any other chat are ignored.
 
 ## Public/private model
 

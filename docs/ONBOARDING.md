@@ -120,6 +120,12 @@ Inbox messages are clarifications only: they can narrow the work, never widen
 the manifest. Every message both ways is in the audit trace. Any platform can
 be the chat surface by reading/writing those two folders.
 
+**From your phone:** `node scripts/telegram_bridge.mjs <workspace>` relays
+the mailbox to a Telegram bot. One-time setup: message @BotFather → `/newbot`
+→ `export TELEGRAM_BOT_TOKEN=...`; run the bridge once without
+`TELEGRAM_CHAT_ID`, message your bot, and it prints your chat id → export it
+and rerun. Only that chat is relayed; everyone else is ignored and logged.
+
 ## 5. Where things land
 
 Every run writes, inside the workspace only:
