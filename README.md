@@ -2,6 +2,32 @@
 
 [![CI](https://github.com/openreflect/single-file-micro-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/openreflect/single-file-micro-agent/actions/workflows/ci.yml)
 
+> **Others build agents you have to trust — this is the agent you can verify.**
+
+1. **Enforcement is code, not prompts.** Every other agent framework asks the
+   model to behave; this one makes violations mechanically impossible
+   (workspace, command allowlist, budgets — plain if-statements the model
+   can't reach). A different trust category, not a better prompt.
+2. **Work is contracted, not requested.** A task is a signed, validatable
+   manifest with declared inputs, outputs, and ceilings — "what is the agent
+   allowed to do" is a reviewable document, not a vibe.
+3. **Every run produces proof.** The append-only trace plus result record can
+   show a third party what happened, in order, with hashes — the audit record
+   is a first-class product output.
+4. **It gets *more* deterministic with use.** Statistical certification and
+   pinning mean a repeated task converges to a proven configuration and gets
+   cheaper (measured live: 3 → 3 → 2 model calls). Most agents drift; this
+   one settles.
+5. **Zero footprint.** One ~400-line file, no dependencies, no daemon, no
+   install — runs anywhere Node ≥ 18 or Deno exists.
+6. **Autonomy with a human ignition key.** It runs persistently and
+   unattended, yet cannot self-task, and chat can only narrow its work —
+   persistent autonomy *without* open-ended agency.
+7. **Built to be delegated to.** File-based mailbox and memory mean any
+   platform (OpenClaw, Hermes, a Slack bot, cron) becomes its UI or
+   dispatcher with zero integration — the bounded executor in everyone
+   else's stack, not another competing brain.
+
 Single File Micro Agent is a tiny, API-agnostic framework for running disposable autonomous agents in tightly bounded workspaces. It is designed for simple tasks where a full agent platform would add more surface area than the task needs.
 
 The core idea is to keep the harness small enough to inspect, restrict what the agent can touch, and make every run produce a durable result record.
