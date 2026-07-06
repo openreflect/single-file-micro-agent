@@ -46,13 +46,13 @@ single-file-micro-agent
 │   ├── Manifest validator                            [shipped: validate_task.py]
 │   ├── Co-developed disambiguation (§5.5)            [specified]
 │   │   └── Restriction-only clarifications, operator-gated expansion
-│   └── Result record                                 [specified]
+│   └── Result record                                 [shipped: M0]
 │       ├── Emergent configuration capture
 │       ├── Re-anchored event ordering
 │       ├── Lifecycle transitions + mutation traces
 │       └── Endpoint weight snapshots
-├── Decision core — the flywheel (§5)                 [specified]
-│   ├── Genesis prompt                                [OPEN — not yet designed]
+├── Decision core — the flywheel (§5)                 [M0: single-loop floor shipped]
+│   ├── Genesis prompt                                [drafted: prompts/genesis.prompt.md]
 │   ├── Bootstrap → emergent configuration (§5.4)
 │   ├── Worker loops (≥3, async, dynamic)
 │   │   └── Each loop = instantiated LLM conversation
@@ -69,10 +69,10 @@ single-file-micro-agent
 │   ├── Tiers placed by measured latency (short / medium / long)
 │   ├── Reference discipline (fast tier = pointers only)
 │   └── Recall modes: referential · semantic · episodic
-├── Clocking (§4)                                     [specified]
+├── Clocking (§4)                                     [M0: monotonic log shipped; NTP pending]
 │   ├── Monotonic ordering log (doubles as episodic index)
 │   └── Scheduled NTP re-anchor
-├── Runtime (§3)                                      [specified]
+├── Runtime (§3)                                      [shipped: agent.mjs]
 │   ├── Single non-compiled file, JIT-class runtime
 │   └── Self-modification: mutable policy / immutable floor
 ├── Observability (§7)                                [external, out of scope]
@@ -81,8 +81,12 @@ single-file-micro-agent
     └── Public generic upstream · private forks hold keys, logs, observer
 ```
 
-Only the manifest schema and validator exist as code today; everything else is
-specified but unbuilt, and the genesis prompt is the one node that is neither.
+M0 is shipped: [agent.mjs](agent.mjs) (321 lines, Node ≥ 18 or Deno, zero
+dependencies) runs a single loop under the full containment floor — manifest
+enforcement, dry-run, append-only trace, result record — verified offline by
+[tests/test_m0.py](tests/test_m0.py) via the deterministic mock provider.
+Multi-loop bootstrap, epsilon soft tier, lifecycle, and the live weight grid
+are M1+.
 
 ## Design principles
 
@@ -98,31 +102,52 @@ specified but unbuilt, and the genesis prompt is the one node that is neither.
 .
 ├── README.md
 ├── PRD.md
+├── SPEC.md
+├── agent.mjs                  # the single file — M0 runner
 ├── docs/
+│   ├── DEFINITIONS.md
+│   └── ONBOARDING.md
 ├── examples/
-│   └── task-manifest.example.json
+│   ├── task-manifest.example.json
+│   └── workspaces/summarize-fixture/
 ├── prompts/
+│   ├── genesis.prompt.md
 │   └── validate-task.prompt.md
 ├── scripts/
 │   └── validate_task.py
 └── tests/
+    └── test_m0.py
 ```
 
 ## Current status
 
-This is an initial public-safe project workspace. It contains the intended repository shape, a synthetic task manifest, and a deterministic task-manifest validator.
-
-Run the public-safe check:
+The M0 containment-floor runner is shipped. New here? Follow
+[docs/ONBOARDING.md](docs/ONBOARDING.md) — auth modes (API keys, ChatGPT-plan
+OAuth, OAuth2 client-credentials), verification steps, and where run records
+land. Public-safe checks, all offline:
 
 ```bash
 python3 scripts/validate_task.py examples/task-manifest.example.json
+python3 tests/test_m0.py                        # floor tests via mock provider
 ```
+
+Run a task (dry-run is the default; `--apply` executes for real; providers
+read `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` from the
+environment):
+
+```bash
+node agent.mjs path/to/manifest.json
+node agent.mjs path/to/manifest.json --apply --task="what to do"
+```
+
+Every run writes `.sfma/trace.jsonl` (append-only event log) and
+`.sfma/result.json` (the result record) inside the workspace.
 
 ## Public/private model
 
 Use this repository as the generic upstream. Keep private model keys, local runtime paths, live task logs, and environment-specific command policies in private downstream repositories or private branches.
 
 ```text
-ORG/single-file-micro-agent public generic framework
-private downstream fork      local adapters, credentials, task logs
+openreflect/single-file-micro-agent  public generic framework
+private downstream fork              local adapters, credentials, task logs
 ```

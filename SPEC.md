@@ -356,8 +356,8 @@ logs, local runtime paths, environment-specific command policy, and the external
 observer stay in **private downstream forks or branches**.
 
 ```text
-ORG/single-file-micro-agent   public generic framework, synthetic only
-private downstream fork        adapters, credentials, task logs, observer
+openreflect/single-file-micro-agent  public generic framework, synthetic only
+private downstream fork              adapters, credentials, task logs, observer
 ```
 
 ## 11. Impossibility boundaries (stated so they are never re-litigated)
