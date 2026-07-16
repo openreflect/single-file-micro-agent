@@ -1,7 +1,10 @@
 # Onboarding — from zero to a governed run
 
 Prerequisites: Node ≥ 18 (or Deno), `python3` for the validator and tests.
-Nothing to install — the agent is one file with zero dependencies.
+The agent has zero package dependencies. Applied `run` tool calls additionally
+require Linux with working unprivileged user/mount/PID/network namespaces and
+the standard `unshare`, `mount`, and `chroot` utilities; command execution
+fails closed without them. See [SECURITY.md](../SECURITY.md).
 
 ## 1. Pick your auth mode (the "switch")
 
@@ -86,7 +89,7 @@ the next endpoint like any transport error.
 
 ```bash
 python3 scripts/validate_task.py your-manifest.json   # TASK_OK?
-python3 tests/test_m0.py                              # 11 offline floor tests
+python3 tests/test_m0.py                              # offline + adversarial floor tests
 node agent.mjs your-manifest.json                     # dry-run (default)
 ```
 
@@ -133,6 +136,18 @@ Every run writes, inside the workspace only:
 - `.sfma/trace.jsonl` — append-only event log (every call, verdict, write)
 - `.sfma/result.json` — the result record: bootstrap, criteria, endpoint
   weights, verdict
+
+Verify both artifacts after a run:
+
+```bash
+node scripts/verify_audit.mjs <workspace>
+```
+
+Set `SFMA_AUDIT_PRIVATE_KEY` to an Ed25519 PKCS#8 PEM value before the run when
+the integrity commitments need third-party authenticity, not only
+tamper-evidence relative to a retained trace head. Verifiers must set
+`SFMA_AUDIT_PUBLIC_KEY` from a separate trusted copy; the public key embedded
+in the result is convenient but does not establish identity by itself.
 
 Keys, tenant IDs, and live manifests belong in your private downstream fork
 (SPEC §10) — this public repo stays synthetic.

@@ -61,10 +61,12 @@ class M0Test(unittest.TestCase):
         p.write_text(json.dumps(m))
         return p
 
-    def run_agent(self, manifest, script=None, apply=True):
+    def run_agent(self, manifest, script=None, apply=True, extra_env=None):
         env = {**os.environ}
         if script is not None:
             env["SFMA_MOCK"] = json.dumps(script)
+        if extra_env:
+            env.update(extra_env)
         args = RUNNER + [str(manifest)] + (["--apply"] if apply else [])
         return subprocess.run(args, capture_output=True, text=True, env=env, timeout=120)
 
@@ -127,6 +129,15 @@ class M0Test(unittest.TestCase):
         fails = [v for v in self.verdicts() if not v["data"]["pass"]]
         self.assertIn("outside workspace", fails[0]["data"]["reason"])
 
+    def test_undeclared_output_refused(self):
+        script = [CANDIDATE, {"tool": "write", "path": "not-declared.txt", "content": "x"},
+                  {"tool": "done", "summary": "tried"}]
+        r = self.run_agent(self.manifest(), script)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse((self.ws / "not-declared.txt").exists())
+        fails = [v for v in self.verdicts() if not v["data"]["pass"]]
+        self.assertIn("not a declared output", fails[0]["data"]["reason"])
+
     def test_allowed_command_runs(self):
         script = [CANDIDATE, {"tool": "run", "cmd": "echo floor-ok"},
                   {"tool": "write", "path": "result.json", "content": "ok"},
@@ -134,6 +145,31 @@ class M0Test(unittest.TestCase):
         r = self.run_agent(self.manifest(), script)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.record()["hardTierFailures"], 0)
+
+    def test_allowed_interpreter_is_os_sandboxed(self):
+        probe = """import json, os, pathlib, socket
+outside = pathlib.Path('../outside.txt')
+outside.write_text('namespace-only')
+s = socket.socket(); s.settimeout(0.2)
+result = {
+    'host_file_visible': pathlib.Path('/etc/passwd').exists(),
+    'secret_visible': 'SFMA_TEST_SECRET' in os.environ,
+    'network_reachable': s.connect_ex(('1.1.1.1', 80)) == 0,
+    'input': pathlib.Path('input.txt').read_text().strip(),
+}
+pathlib.Path('result.json').write_text(json.dumps(result))
+"""
+        (self.ws / "probe.py").write_text(probe)
+        (self.ws / "input.txt").write_text("declared")
+        script = [CANDIDATE, {"tool": "run", "cmd": "python3 probe.py"},
+                  {"tool": "done", "summary": "ok"}]
+        manifest = self.manifest(allowedCommands=["python3"], inputs=["probe.py", "input.txt"])
+        r = self.run_agent(manifest, script, extra_env={"SFMA_TEST_SECRET": "must-not-leak"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        data = json.loads((self.ws / "result.json").read_text())
+        self.assertEqual(data, {"host_file_visible": False, "secret_visible": False,
+                                "network_reachable": False, "input": "declared"})
+        self.assertFalse((self.dir / "outside.txt").exists())
 
     def test_max_turns_halts(self):
         script = [CANDIDATE] + [{"tool": "read", "path": "nope.txt"}] * 20
@@ -424,6 +460,46 @@ class M0Test(unittest.TestCase):
         self.assertEqual(len(seqs), len(set(seqs)))
         self.assertEqual(traces[0]["kind"], "clock-anchor")
         self.assertTrue(all(t["anchor"].startswith("clock-anchor-") for t in traces[1:]))
+        self.assertTrue(all(len(t["hash"]) == 64 and len(t["prevHash"]) == 64 for t in traces))
+        verify = subprocess.run(["node", str(REPO / "scripts" / "verify_audit.mjs"), str(self.ws)],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertIn("AUDIT_OK signature=none", verify.stdout)
+
+    def test_trace_tampering_is_detected_before_next_run(self):
+        script = [CANDIDATE, {"tool": "done", "summary": "minimal"}]
+        manifest = self.manifest(outputs=[])
+        self.run_agent(manifest, script)
+        trace_file = self.ws / ".sfma" / "trace.jsonl"
+        lines = trace_file.read_text().splitlines()
+        first = json.loads(lines[0]); first["data"]["source"] = "tampered"
+        lines[0] = json.dumps(first)
+        trace_file.write_text("\n".join(lines) + "\n")
+        verify = subprocess.run(["node", str(REPO / "scripts" / "verify_audit.mjs"), str(self.ws)],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(verify.returncode, 1)
+        self.assertIn("AUDIT_INVALID", verify.stderr)
+        rerun = self.run_agent(manifest, script)
+        self.assertEqual(rerun.returncode, 1)
+        self.assertIn("failed hash-chain verification", rerun.stderr)
+
+    def test_ed25519_signed_audit_verifies(self):
+        keygen = subprocess.run([
+            "node", "-e",
+            "const c=require('crypto');const k=c.generateKeyPairSync('ed25519');"
+            "console.log(JSON.stringify({privateKey:k.privateKey.export({type:'pkcs8',format:'pem'}),"
+            "publicKey:k.publicKey.export({type:'spki',format:'pem'})}))",
+        ], capture_output=True, text=True, check=True, timeout=30)
+        keys = json.loads(keygen.stdout)
+        script = [CANDIDATE, {"tool": "done", "summary": "minimal"}]
+        r = self.run_agent(self.manifest(outputs=[]), script,
+                           extra_env={"SFMA_AUDIT_PRIVATE_KEY": keys["privateKey"]})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        verify = subprocess.run(["node", str(REPO / "scripts" / "verify_audit.mjs"), str(self.ws)],
+                                capture_output=True, text=True, timeout=30,
+                                env={**os.environ, "SFMA_AUDIT_PUBLIC_KEY": keys["publicKey"]})
+        self.assertEqual(verify.returncode, 0, verify.stdout + verify.stderr)
+        self.assertIn("AUDIT_OK signature=trusted", verify.stdout)
 
 
 if __name__ == "__main__":

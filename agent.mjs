@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import os from "node:os";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 
@@ -65,17 +66,52 @@ const mono = () => {
   return (lastSeq = t);
 };
 
-// ---- trace (DEFINITIONS §1): append-only JSONL
+const stable = (value) => {
+  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stable(value[k])}`).join(",")}}`;
+  return JSON.stringify(value);
+};
+const digest = (value) => crypto.createHash("sha256").update(value).digest("hex");
+
+// ---- trace (DEFINITIONS §1): append-only, hash-chained JSONL
 function openTrace(file) {
   let anchorId = "unanchored";
+  let previous = "0".repeat(64), entries = 0;
+  if (fs.existsSync(file) && fs.statSync(file).size) {
+    const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+    const parsed = lines.map((line) => JSON.parse(line));
+    const firstChained = parsed.findIndex((e) => e.hash || e.prevHash);
+    const legacyCount = firstChained < 0 ? parsed.length : firstChained;
+    if (parsed.slice(0, legacyCount).some((e) => e.hash || e.prevHash)
+        || parsed.slice(legacyCount).some((e) => !e.hash || !e.prevHash)) {
+      throw new Error("existing trace has an invalid legacy/hash-chain boundary");
+    }
+    if (legacyCount) {
+      // Upgrade path: bind an intact legacy prefix into the first chained entry.
+      previous = digest(lines.slice(0, legacyCount).map((line) => line + "\n").join(""));
+      entries = legacyCount;
+    }
+    if (firstChained >= 0) {
+      for (const e of parsed.slice(firstChained)) {
+        const hash = e.hash, body = { ...e };
+        delete body.hash;
+        if (body.prevHash !== previous || digest(stable(body)) !== hash) throw new Error("existing trace failed hash-chain verification");
+        previous = hash; entries++;
+      }
+    }
+    anchorId = parsed.at(-1)?.anchor || anchorId;
+  }
   const emit = (kind, loop, data, refs = [], cls) => {
-    const e = { seq: mono(), anchor: anchorId, loop, kind, id: "", refs, ...(cls && { class: cls }), data };
+    const e = JSON.parse(JSON.stringify({ seq: mono(), anchor: anchorId, loop, kind, id: "", refs, ...(cls && { class: cls }), data, prevHash: previous }));
     e.id = `${kind}-${e.seq}`;
+    e.hash = digest(stable(e));
     fs.appendFileSync(file, JSON.stringify(e) + "\n");
+    previous = e.hash; entries++;
     return e;
   };
   return {
     emit,
+    integrity: () => ({ algorithm: "sha256-chain-v1", headHash: previous, entries }),
     anchor(source) {
       const e = emit("clock-anchor", 0, { wallMs: Date.now(), source });
       anchorId = e.id;
@@ -92,7 +128,18 @@ function validate(m) {
   if ("modelAdapter" in m) errs.push("modelAdapter was replaced by modelEndpoints in schema v2");
   if (!Array.isArray(m.modelEndpoints) || m.modelEndpoints.length < 1) errs.push("modelEndpoints must declare at least 1 endpoint");
   else for (const ep of m.modelEndpoints) if (!ep.name || !ep.provider || !ep.model) errs.push("endpoint needs name, provider, model");
-  if (m.maxTurns < 1) errs.push("maxTurns must be at least 1");
+  if (!Number.isInteger(m.maxTurns) || m.maxTurns < 1) errs.push("maxTurns must be an integer of at least 1");
+  for (const field of ["inputs", "outputs"]) {
+    if (!Array.isArray(m[field])) { errs.push(`${field} must be an array`); continue; }
+    for (const value of m[field]) {
+      if (typeof value !== "string" || !value || path.isAbsolute(value) || path.normalize(value).startsWith("..")) errs.push(`${field} entries must be non-empty relative paths: ${value}`);
+      if (field === "outputs" && (path.normalize(value) === ".sfma" || path.normalize(value).startsWith(`.sfma${path.sep}`))) errs.push("outputs cannot target reserved .sfma audit state");
+    }
+  }
+  if (!Array.isArray(m.allowedCommands)) errs.push("allowedCommands must be an array");
+  else for (const command of m.allowedCommands) if (typeof command !== "string" || !command || command !== path.basename(command) || /\s/.test(command)) errs.push(`allowedCommands entries must be executable basenames: ${command}`);
+  const ranges = { maxModelCalls: [1, 100000], maxSeconds: [1, 86400], maxLoops: [1, 16], maxPendingTasks: [1, 4096] };
+  for (const [field, [low, high]] of Object.entries(ranges)) if (field in m && (!Number.isInteger(m[field]) || m[field] < low || m[field] > high)) errs.push(`${field} must be an integer in [${low}, ${high}]`);
   return errs;
 }
 
@@ -109,8 +156,77 @@ function resolveIn(ws, p) {
 function checkCmd(cmd, allowed) {
   if (/[;&|<>`$(){}\n\\]/.test(cmd)) throw new Error("shell metacharacters are not allowed");
   const argv = String(cmd).trim().split(/\s+/);
-  if (!allowed.includes(path.basename(argv[0]))) throw new Error(`command not in allowedCommands: ${argv[0]}`);
+  if (!argv[0]) throw new Error("empty command");
+  const executable = path.basename(argv[0]);
+  if (!allowed.includes(executable)) throw new Error(`command not in allowedCommands: ${argv[0]}`);
+  argv[0] = executable; // never honor a model-supplied executable path
   return argv;
+}
+
+function outputPath(ws, p, outputs) {
+  const abs = resolveIn(ws, p);
+  const rel = path.relative(ws, abs);
+  const declared = outputs.map((o) => path.normalize(String(o)));
+  if (!declared.includes(rel)) throw new Error(`write is not a declared output: ${p}`);
+  if (rel === ".sfma" || rel.startsWith(`.sfma${path.sep}`)) throw new Error(".sfma audit state is reserved to the runner");
+  return abs;
+}
+
+const SANDBOX_SCRIPT = String.raw`set -eu
+root=$1; stage=$2; shift 2
+mount --make-rprivate /
+mount -t tmpfs -o mode=0755 tmpfs "$root"
+mkdir -p "$root/usr" "$root/workspace" "$root/tmp" "$root/dev"
+mount --rbind /usr "$root/usr"
+mount -o remount,ro,bind "$root/usr"
+ln -s usr/bin "$root/bin"
+ln -s usr/lib "$root/lib"
+[ ! -e /lib64 ] || ln -s usr/lib64 "$root/lib64"
+mount --bind "$stage" "$root/workspace"
+touch "$root/dev/null"
+mount --bind /dev/null "$root/dev/null"
+/usr/sbin/chroot "$root" /bin/sh -ceu 'cd /workspace; exec /usr/bin/env -i PATH=/usr/bin:/bin HOME=/workspace TMPDIR=/tmp "$@"' sh "$@"`;
+
+function assertNoSymlinks(src) {
+  const info = fs.lstatSync(src);
+  if (info.isSymbolicLink()) throw new Error(`symbolic links are not accepted at the containment boundary: ${src}`);
+  if (info.isDirectory()) for (const name of fs.readdirSync(src)) assertNoSymlinks(path.join(src, name));
+  return info;
+}
+
+function copyTreeSafe(src, dst) {
+  const info = assertNoSymlinks(src);
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.cpSync(src, dst, { recursive: info.isDirectory(), dereference: false });
+}
+
+function runSandboxed(state, argv) {
+  if (process.platform !== "linux") throw new Error("secure command sandbox unavailable: Linux user/mount/network namespaces are required");
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "sfma-sandbox-"));
+  const stage = path.join(base, "stage"), root = path.join(base, "root");
+  fs.mkdirSync(stage); fs.mkdirSync(root);
+  try {
+    for (const input of state.manifest.inputs) {
+      const src = resolveIn(state.ws, input);
+      if (!fs.existsSync(src)) throw new Error(`declared input does not exist: ${input}`);
+      copyTreeSafe(src, path.join(stage, path.normalize(String(input))));
+    }
+    const r = spawnSync("unshare", ["--user", "--map-root-user", "--mount", "--net", "--pid", "--fork", "/bin/sh", "-ceu", SANDBOX_SCRIPT, "sh", root, stage, ...argv], {
+      timeout: 60000, encoding: "utf8", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C.UTF-8" },
+    });
+    if (r.error) throw new Error(`secure command sandbox unavailable: ${r.error.message}`);
+    if (r.status === 125 || /unshare failed|Operation not permitted/.test(r.stderr || "")) throw new Error(`secure command sandbox unavailable: ${(r.stderr || "namespace setup failed").trim()}`);
+    for (const output of state.manifest.outputs) {
+      const staged = path.join(stage, path.normalize(String(output)));
+      if (!fs.existsSync(staged)) continue;
+      const dst = outputPath(state.ws, output, state.manifest.outputs);
+      copyTreeSafe(staged, dst);
+      state.writes.set(path.relative(state.ws, dst), true);
+    }
+    return r;
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 }
 
 // ---- providers (SPEC §5.7; M0: prior-ranked failover, EWMA measurement)
@@ -243,7 +359,7 @@ function dispatch(state, call) {
   };
   if (call.tool === "read") return guard(() => clip(fs.readFileSync(resolveIn(ws, call.path), "utf8")));
   if (call.tool === "write") return guard(() => {
-    const abs = resolveIn(ws, call.path);
+    const abs = outputPath(ws, call.path, m.outputs);
     state.writes.set(path.relative(ws, abs), true);
     if (dry) return `[dry-run] write of ${call.path} recorded, not applied`;
     fs.mkdirSync(path.dirname(abs), { recursive: true });
@@ -261,7 +377,7 @@ function dispatch(state, call) {
   if (call.tool === "run") return guard(() => {
     const argv = checkCmd(call.cmd, m.allowedCommands);
     if (dry) return `[dry-run] command allowed, not executed: ${call.cmd}`;
-    const r = spawnSync(argv[0], argv.slice(1), { cwd: ws, timeout: 60000, encoding: "utf8" });
+    const r = runSandboxed(state, argv);
     return clip(`exit=${r.status}\nstdout:${r.stdout || ""}\nstderr:${r.stderr || ""}`);
   });
   state.hardFails++;
@@ -358,7 +474,7 @@ async function main() {
   }
 
   const outputs = manifest.outputs.map((o) => {
-    const abs = path.join(ws, o);
+    const abs = outputPath(ws, o, manifest.outputs);
     const exists = dry ? state.writes.has(o) : fs.existsSync(abs);
     return { path: o, ok: exists, ...(exists && !dry && { sha256: sha256(abs) }) };
   });
@@ -396,6 +512,16 @@ async function main() {
     clock: { firstSeq, lastSeq: lastAnchor.seq, anchorSource: "system-wall (NTP re-anchor is post-M0)" },
     trace: ".sfma/trace.jsonl", dryRun: dry, turns, modelCalls: state.calls, budget, hardTierFailures: state.hardFails, verdict,
   };
+  const integrity = { ...trace.integrity(), manifestSha256: digest(stable(manifest)), resultSha256: digest(stable(record)) };
+  if (process.env.SFMA_AUDIT_PRIVATE_KEY) {
+    const key = crypto.createPrivateKey(process.env.SFMA_AUDIT_PRIVATE_KEY);
+    integrity.signature = {
+      algorithm: "ed25519",
+      publicKey: crypto.createPublicKey(key).export({ type: "spki", format: "pem" }),
+      value: crypto.sign(null, Buffer.from(stable(integrity)), key).toString("base64"),
+    };
+  }
+  record.integrity = integrity;
   fs.writeFileSync(path.join(ws, ".sfma", "result.json"), JSON.stringify(record, null, 2));
   console.log(`${verdict.toUpperCase()} turns=${turns} dryRun=${dry} record=${path.join(manifest.workspace, ".sfma", "result.json")}`);
   return verdict === "completed" ? 0 : 1;

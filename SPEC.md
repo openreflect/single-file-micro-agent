@@ -358,10 +358,20 @@ halt (SIGINT/SIGTERM, or creating `.sfma/HALT` in the workspace) drains the
 run and records verdict `halted-operator`.
 
 The allowlist is exhaustive: a command not named in `allowedCommands` cannot be
-run. The workspace is the only filesystem region a run may touch. These are
-enforcement, not convention.
+run. A model-requested `write` may target an exact declared output only. On the
+shipped Linux command path, an allowlisted command receives a disposable staged
+workspace containing declared inputs, a scrubbed environment, no host network,
+and a fresh mount/PID/user namespace; only declared outputs are copied back.
+The runner fails closed if those namespace facilities are unavailable. These
+are enforcement, not convention. They constrain model-directed tools; provider
+I/O and the operator-owned runner itself necessarily access external runtime
+libraries, configured endpoints, and the manifest path.
 
-**Result record.** Every run produces a durable, auditable result record. For
+**Result record.** Every run produces a durable, auditable result record. Trace
+entries form a SHA-256 chain, and the result commits to the trace head/count,
+manifest, and result body. An optional operator-supplied Ed25519 key signs those
+commitments; without a signature or an externally retained trusted head, a
+host actor who can rewrite both files can recompute an unsigned chain. For
 this project that record MUST also capture the emergent configuration (§5.4),
 the re-anchored event ordering (§4), configuration lifecycle transitions
 (§5.6), self-modification traces (§3), and endpoint weight snapshots (§5.7), so
@@ -430,3 +440,9 @@ unauthorized access, running commands outside the declared allowlist, touching
 state outside the declared workspace, or any operation the observable boundary
 cannot see. The rails in §7 and §8 exist precisely to keep the agent inside that
 line.
+
+The current command sandbox is designed for model-directed use of trusted host
+executables. It is not a hardened container for hostile native binaries or
+kernel exploits, and it does not yet impose CPU, memory, file-size, or
+process-count cgroups/rlimits. [SECURITY.md](SECURITY.md) is the shipped claim
+ledger and takes precedence over shorthand security language in overview text.

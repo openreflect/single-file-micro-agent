@@ -4,22 +4,23 @@
 
 > **Others build agents you have to trust — this is the agent you can verify.**
 
-1. **Enforcement is code, not prompts.** Every other agent framework asks the
-   model to behave; this one makes violations mechanically impossible
-   (workspace, command allowlist, budgets — plain if-statements the model
-   can't reach). A different trust category, not a better prompt.
-2. **Work is contracted, not requested.** A task is a signed, validatable
+1. **Enforcement is code, not prompts.** Model-requested writes are limited to
+   declared outputs; commands are allowlisted and execute fail-closed in an
+   isolated Linux namespace with declared inputs only, no inherited secrets,
+   and no host network. These controls live below the model.
+2. **Work is contracted, not requested.** A task is a hash-bound, validatable
    manifest with declared inputs, outputs, and ceilings — "what is the agent
    allowed to do" is a reviewable document, not a vibe.
-3. **Every run produces proof.** The append-only trace plus result record can
-   show a third party what happened, in order, with hashes — the audit record
-   is a first-class product output.
+3. **Every run produces verifiable evidence.** The hash-chained trace and
+   result commitments detect edits and bind the run to its manifest. Optional
+   Ed25519 signing makes the record independently authenticatable.
 4. **It gets *more* deterministic with use.** Statistical certification and
    pinning mean a repeated task converges to a proven configuration and gets
    cheaper (measured live: 3 → 3 → 2 model calls). Most agents drift; this
    one settles.
-5. **Zero footprint.** One ~400-line file, no dependencies, no daemon, no
-   install — runs anywhere Node ≥ 18 or Deno exists.
+5. **Small footprint.** The agent remains one dependency-free file with no
+   daemon. Model/read/write/dry-run behavior needs Node ≥ 18 or Deno; secure
+   applied command execution additionally needs Linux namespace utilities.
 6. **Autonomy with a human ignition key.** It runs persistently and
    unattended, yet cannot self-task, and chat can only narrow its work —
    persistent autonomy *without* open-ended agency.
@@ -28,7 +29,7 @@
    dispatcher with zero integration — the bounded executor in everyone
    else's stack, not another competing brain.
 
-Single File Micro Agent is a tiny, API-agnostic framework for running disposable autonomous agents in tightly bounded workspaces. It is designed for simple tasks where a full agent platform would add more surface area than the task needs.
+Single File Micro Agent is a tiny, API-agnostic framework for running disposable autonomous agents in tightly bounded workspaces. It is designed for simple tasks where a full agent platform would add more surface area than the task needs. The exact enforced claims and remaining boundaries are in [SECURITY.md](SECURITY.md).
 
 The core idea is to keep the harness small enough to inspect, restrict what the agent can touch, and make every run produce a durable result record.
 
@@ -36,7 +37,7 @@ The core idea is to keep the harness small enough to inspect, restrict what the 
 
 Many agent tasks need a worker, not a platform. A small autonomous loop can review a file, transform a fixture, run a command, or produce a short report if the environment boundary is clear.
 
-This project captures the reusable public pattern for a minimal sandboxed agent runner while leaving private model routing, credentials, and live operational policy in downstream repos.
+This project captures the reusable public pattern for a minimal contained agent runner while leaving private model routing, credentials, and live operational policy in downstream repos.
 
 ## Core idea
 
@@ -114,9 +115,9 @@ single-file-micro-agent
     └── Public generic upstream · private forks hold keys, logs, observer
 ```
 
-M0 is shipped: [agent.mjs](agent.mjs) (321 lines, Node ≥ 18 or Deno, zero
-dependencies) runs a single loop under the full containment floor — manifest
-enforcement, dry-run, append-only trace, result record — verified offline by
+M0 is shipped: [agent.mjs](agent.mjs) (Node ≥ 18 or Deno, zero package
+dependencies) runs a single loop under the containment floor — manifest
+enforcement, dry-run, hash-chained trace, result record — verified offline by
 [tests/test_m0.py](tests/test_m0.py) via the deterministic mock provider.
 Multi-loop bootstrap, epsilon soft tier, lifecycle, and the live weight grid
 are M1+.
@@ -134,6 +135,7 @@ are M1+.
 ```text
 .
 ├── README.md
+├── SECURITY.md                # enforced claim ledger + honest boundaries
 ├── PRD.md
 ├── SPEC.md
 ├── agent.mjs                  # the single file — M0 runner
@@ -147,7 +149,8 @@ are M1+.
 │   ├── genesis.prompt.md
 │   └── validate-task.prompt.md
 ├── scripts/
-│   └── validate_task.py
+│   ├── validate_task.py
+│   └── verify_audit.mjs
 └── tests/
     └── test_m0.py
 ```
@@ -177,6 +180,12 @@ Every run writes `.sfma/trace.jsonl` (append-only event log) and
 `.sfma/result.json` (the result record) inside the workspace, and maintains
 `.sfma/memory.json` — cross-run memory that certifies and pins proven
 configurations over repeated runs.
+
+Verify the trace/result commitments (and Ed25519 signature when configured):
+
+```bash
+node scripts/verify_audit.mjs path/to/workspace
+```
 
 Run continuously (a relay of bounded runs — each under its own budget and
 audit record; stop any time with Ctrl-C or `touch <workspace>/.sfma/HALT`):

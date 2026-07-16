@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -132,10 +133,24 @@ def main() -> int:
     if "taskStatement" in data and not isinstance(data["taskStatement"], str):
         errors.append("taskStatement must be a string")
 
+    for field in ("inputs", "outputs"):
+        for value in data.get(field, []) if isinstance(data.get(field), list) else []:
+            normalized = os.path.normpath(value) if isinstance(value, str) else ""
+            if (not isinstance(value, str) or not value or os.path.isabs(value)
+                    or normalized == ".." or normalized.startswith(".." + os.sep)):
+                errors.append(f"{field} entries must be non-empty relative paths: {value}")
+            if field == "outputs" and (normalized == ".sfma" or normalized.startswith(".sfma" + os.sep)):
+                errors.append("outputs cannot target reserved .sfma audit state")
+
+    for command in data.get("allowedCommands", []) if isinstance(data.get("allowedCommands"), list) else []:
+        if (not isinstance(command, str) or not command or command != os.path.basename(command)
+                or any(ch.isspace() for ch in command)):
+            errors.append(f"allowedCommands entries must be executable basenames: {command}")
+
     for field, (low, high) in BUDGET_FIELDS.items():
-        if field in data and (not isinstance(data[field], (int, float)) or isinstance(data[field], bool)
+        if field in data and (not isinstance(data[field], int) or isinstance(data[field], bool)
                               or not low <= data[field] <= high):
-            errors.append(f"{field} must be a number in [{low}, {high}]")
+            errors.append(f"{field} must be an integer in [{low}, {high}]")
 
     if "allowSelfModification" in data and not isinstance(data["allowSelfModification"], bool):
         errors.append("allowSelfModification must be a boolean")

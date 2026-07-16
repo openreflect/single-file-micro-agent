@@ -7,8 +7,11 @@ first-run values and apply when `tuning` is absent.
 
 ## 1. Trace entry
 
-The trace is an append-only JSONL log — the medium's durable form. One entry
-per event. Entries are never edited or deleted; corrections are new entries.
+The trace is an append-only, SHA-256-chained JSONL log — the medium's durable
+form. One entry per event. The runner never edits or deletes entries;
+corrections are new entries. Host edits remain physically possible but are
+detectable by verification of the chain (and authenticatable when the result
+commitment is signed).
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -20,6 +23,8 @@ per event. Entries are never edited or deleted; corrections are new entries.
 | `refs` | string[] | IDs this entry responds to or depends on (may be empty) |
 | `class` | string? | `reasoning` or `mechanical` — present on model-call kinds |
 | `data` | object | Kind-specific payload, or `{ptr: <tier-ref>}` when the payload lives in a slower tier (reference discipline, §6) |
+| `prevHash` | hex string | SHA-256 hash of the prior entry, or the legacy-prefix digest/zero genesis |
+| `hash` | hex string | SHA-256 over the canonical entry including `prevHash` and excluding `hash` |
 
 **Kinds** (exhaustive): `task`, `result`, `verdict` (epsilon judgment:
 `{tier: "hard"|"soft", pass: bool, reason}`), `mutation` (self-modification:
@@ -46,6 +51,7 @@ One JSON document per run, assembled by the floor at exit (any exit path).
 | `clock` | First/last `seq`, all anchor points |
 | `trace` | Path/pointer to the full JSONL trace |
 | `verdict` | `completed` \| `failed` \| `halted-maxTurns` \| `halted-budget` \| `halted-operator` |
+| `integrity` | Trace head/count plus manifest/result commitments; optional Ed25519 signature |
 
 ## 3. Endpoint grid
 
