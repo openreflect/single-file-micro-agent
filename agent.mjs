@@ -54,13 +54,17 @@ turn with exactly one JSON object and no prose or fences:
   {"tool":"recall","mode":"referential","id":I} |
   {"tool":"recall","mode":"episodic","since":S,"until":U,"limit":N} |
   {"tool":"recall","mode":"lexical","query":Q,"limit":N} |
-  {"tool":"recall","mode":"change","query":Q,"limit":N}
+  {"tool":"recall","mode":"change","query":Q,"limit":N} |
+  {"tool":"recall","mode":"semantic","query":Q,"limit":N}
 Paths are relative to the workspace root. Tool results arrive as the next
 user message. Each of your replies consumes one turn of maxTurns.
 recall reads tiered memory: referential fetches a stored record by id,
 episodic returns a window of the ordering log (what happened, in order,
 across this run chain), lexical searches committed memory for a literal
 string, change reports when a fact entered or left memory and in which run.
+semantic is available only where a store measures as similarity-capable; if
+none does, it returns a term-overlap ranking flagged degraded:true — treat
+that as lexical, not semantic, and do not report it as similarity.
 Prefer recalling what a previous run already established over redoing it.
 notify/ask post to the operator mailbox and NEVER block: an ask's answer, if
 any, arrives as an operator message in a later run — continue with what you
@@ -281,6 +285,7 @@ function openStores(ws, trace) {
   map.set("__canary", "1"); map.get("__canary"); map.delete("__canary");
   list.push({
     name: "inproc", latencyMs: since(t),
+    capabilities: { referential: true, episodic: false, lexical: false, changePoint: false, semantic: false },
     put: (id, v) => { map.set(id, v); return `inproc:${id}`; },
     get: (k) => (map.has(k) ? map.get(k) : null),
   });
@@ -294,6 +299,7 @@ function openStores(ws, trace) {
   fs.writeFileSync(canary, "1"); fs.readFileSync(canary, "utf8"); fs.unlinkSync(canary);
   list.push({
     name: "file", latencyMs: since(t),
+    capabilities: { referential: true, episodic: false, lexical: false, changePoint: false, semantic: false },
     put: (id, v) => { fs.writeFileSync(path.join(recDir, id), v); return `file:${id}`; },
     get: (k) => { try { return fs.readFileSync(path.join(recDir, k), "utf8"); } catch { return null; } },
   });
@@ -626,6 +632,35 @@ function dispatch(state, call) {
         const hits = (found.stdout || "").split("\n").filter(Boolean).slice(0, limit);
         out = { mode, query, count: hits.length, hits };
       }
+    } else if (mode === "semantic") {
+      // Similarity search is a capability, never an assumption (SPEC §6). No
+      // store here measures as similarity-capable, so this degrades — and it
+      // degrades LOUDLY: the caller is told, in the result and in the trace,
+      // that it received a lexical term-overlap ranking rather than semantic
+      // similarity. Silently returning keyword hits dressed as semantic ones
+      // would be the dishonest failure this project exists to avoid.
+      const query = String(call.query || "");
+      if (!query) throw new Error("recall semantic requires a query");
+      const capable = state.stores.list.find((s) => s.capabilities?.semantic === true);
+      if (capable) {
+        out = { mode, query, degraded: false, store: capable.name, ...capable.semantic(query, limit) };
+      } else {
+        const git = state.stores.git;
+        const terms = [...new Set((query.toLowerCase().match(/[a-z0-9_]{3,}/g) || []))].slice(0, 8);
+        const scored = new Map();
+        if (git) for (const term of terms) {
+          const found = gitCap(git.dir, ["grep", "-n", "-I", "-i", "--fixed-strings", term]);
+          for (const line of (found.stdout || "").split("\n").filter(Boolean)) {
+            scored.set(line, { line, matched: (scored.get(line)?.matched ?? 0) + 1 });
+          }
+        }
+        const hits = [...scored.values()].sort((a, b) => b.matched - a.matched).slice(0, limit);
+        out = {
+          mode, query, degraded: true,
+          degradation: "no configured store measured as similarity-capable; this is a lexical term-overlap ranking, NOT semantic similarity",
+          terms, count: hits.length, hits,
+        };
+      }
     } else if (mode === "change") {
       // Change-point recall: when did this fact enter or leave memory, and in
       // which run? git's pickaxe answers it directly, so this mode exists
@@ -651,6 +686,7 @@ function dispatch(state, call) {
       op: "recall", mode, ...(call.id && { id: String(call.id) }),
       ...(call.query && { query: clip(String(call.query), 200) }),
       ...(out.tier && { tier: out.tier }), ...(out.count !== undefined && { count: out.count }),
+      ...(out.degraded !== undefined && { degraded: out.degraded }),
       found: out.found !== false && out.available !== false,
     }, [call.ref]);
     return clip(JSON.stringify(out));

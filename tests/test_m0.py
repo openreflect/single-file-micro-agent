@@ -295,6 +295,36 @@ class M0Test(unittest.TestCase):
         self.assertGreater(hit["count"], 0,
                            "the run that introduced the marker must be identifiable")
 
+    def test_recall_semantic_degrades_loudly(self):
+        marker = "SEMANTIC-MARKER-7e4f"
+        cand = dict(CANDIDATE)
+        cand["mission"] = f"Produce result.json in the workspace. {marker}"
+        m = self.manifest()
+        self.run_agent(m, [cand, {"tool": "write", "path": "result.json", "content": "ok"},
+                           {"tool": "done", "summary": "ok"}])
+        r = self.run_agent(m, [CANDIDATE,
+                               {"tool": "recall", "mode": "semantic", "query": marker},
+                               {"tool": "write", "path": "result.json", "content": "ok"},
+                               {"tool": "done", "summary": "ok"}])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        hit = self.recalls()[-1]["data"]
+        self.assertEqual(hit["mode"], "semantic")
+        # No store here measures as similarity-capable, so the degradation must
+        # be visible in the trace — not inferable only by reading the code.
+        self.assertTrue(hit["degraded"],
+                        "semantic recall without a capable store must be flagged degraded")
+
+    def test_no_store_claims_semantic_capability(self):
+        script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
+                  {"tool": "done", "summary": "ok"}]
+        self.run_agent(self.manifest(), script)
+        profiles = [t["data"] for t in self.traces()
+                    if t["kind"] == "store" and t["data"].get("capabilities")]
+        self.assertTrue(profiles)
+        for p in profiles:
+            self.assertFalse(p["capabilities"]["semantic"],
+                             f"{p.get('name')} must not claim similarity search it cannot do")
+
     def test_recall_unknown_mode_refused(self):
         r = self.run_agent(self.manifest(), [CANDIDATE,
                                             {"tool": "recall", "mode": "telepathic"},
