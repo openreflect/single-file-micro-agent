@@ -155,6 +155,65 @@ class M0Test(unittest.TestCase):
                 fails = [v for v in self.verdicts() if not v["data"]["pass"]]
                 self.assertEqual(fails, [], f"{cmd} was wrongly refused")
 
+    def test_git_memory_store_profiles_and_commits_per_run(self):
+        script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
+                  {"tool": "done", "summary": "ok"}]
+        m = self.manifest()
+        self.run_agent(m, script)
+        rec = self.record()
+        store = rec["memory"]["store"]
+        self.assertIsNotNone(store, "git store should be available in test env")
+        self.assertEqual(store["name"], "git-long")
+        self.assertTrue(store["commit"], "run should leave a memory commit")
+        profiles = [t for t in self.traces()
+                    if t["kind"] == "store" and t["data"].get("available")]
+        self.assertTrue(profiles, "store profile must be traced")
+        caps = profiles[0]["data"]["capabilities"]
+        self.assertTrue(caps["episodic"] and caps["lexical"] and caps["changePoint"])
+        self.assertFalse(caps["semantic"], "git is lexical; semantic must not be claimed")
+
+        self.run_agent(m, script)   # second run -> second DAG node
+        memdir = self.ws / ".sfma" / "mem"
+        log = subprocess.run(["git", "log", "--oneline"], cwd=memdir,
+                             capture_output=True, text=True)
+        self.assertEqual(len(log.stdout.strip().splitlines()), 2)
+        shown = subprocess.run(["git", "show", "--name-only", "--format=", "HEAD"],
+                               cwd=memdir, capture_output=True, text=True)
+        self.assertIn("memory.json", shown.stdout)
+
+    def test_memory_store_symlink_refused(self):
+        (self.ws / ".sfma").mkdir(parents=True, exist_ok=True)
+        outside = self.dir / "outside"
+        outside.mkdir()
+        (self.ws / ".sfma" / "mem").symlink_to(outside)
+        script = [CANDIDATE, {"tool": "done", "summary": "x"}]
+        r = self.run_agent(self.manifest(), script)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("must not be a symlink", r.stderr)
+
+    def test_memory_store_refuses_enclosing_repository(self):
+        outer = self.dir / "outer"
+        outer.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+        (outer / "agent.mjs").write_text("// decoy source tree\n")
+        ws2 = outer / "ws"
+        (ws2 / ".sfma" / "mem").mkdir(parents=True)
+        (ws2 / ".sfma" / "mem" / ".git").write_text(f"gitdir: {outer}/.git\n")
+        script = [CANDIDATE, {"tool": "done", "summary": "x"}]
+        r = self.run_agent(self.manifest(workspace=str(ws2)), script)
+        self.assertEqual(r.returncode, 1)
+        # The attack is a `.git` FILE pointing elsewhere: --show-toplevel then
+        # reports the mem dir (looks safe) while objects and refs land in the
+        # repository holding agent.mjs. The guard must inspect the git dir.
+        self.assertTrue(
+            "enclosing repository" in r.stderr or "must be a real repository directory" in r.stderr
+            or "containing agent.mjs" in r.stderr,
+            f"expected containment abort, got: {r.stderr[:400]}")
+        objects = subprocess.run(["git", "log", "--oneline"], cwd=outer,
+                                 capture_output=True, text=True)
+        self.assertEqual(objects.stdout.strip(), "",
+                         "agent must not have committed into the enclosing repository")
+
     def test_workspace_escape_refused(self):
         script = [CANDIDATE, {"tool": "write", "path": "../evil.txt", "content": "x"},
                   {"tool": "done", "summary": "tried"}]

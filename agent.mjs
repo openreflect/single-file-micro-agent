@@ -188,6 +188,93 @@ function checkCmd(cmd, allowed) {
   return argv;
 }
 
+// ---- git-backed long tier (SPEC §6, M2.2)
+// Runner-initiated only: every argument below is a runner constant, never
+// model input, so this path does not go through the model-facing git gate
+// (M2.1) — that gate governs the `run` tool. Git is optional: when it is
+// absent or refuses, the store reports unavailable and the run continues on
+// memory.json alone.
+const gitCap = (dir, args, timeout = 10000) => spawnSync("git", args, { cwd: dir, encoding: "utf8", timeout });
+
+function openMemStore(ws, trace) {
+  const dir = path.join(ws, ".sfma", "mem");
+  const unavailable = (reason) => {
+    trace.emit("store", 0, { name: "git-long", available: false, reason });
+    return null;
+  };
+
+  // Guards run before git does. A symlinked or escaping store would put
+  // memory outside the containment boundary.
+  if (fs.existsSync(dir) && fs.lstatSync(dir).isSymbolicLink()) throw new Error("memory store .sfma/mem must not be a symlink");
+  const probe = fs.existsSync(dir) ? dir : path.dirname(dir);
+  if (path.relative(fs.realpathSync(ws), fs.realpathSync(probe)).startsWith("..")) throw new Error("memory store escapes the workspace");
+
+  const version = gitCap(ws, ["--version"]);
+  if (version.error || version.status !== 0) return unavailable("git not available on this host");
+  fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(path.join(dir, ".git"))) {
+    if (gitCap(dir, ["init", "-q"]).status !== 0) return unavailable("git init failed");
+    gitCap(dir, ["config", "user.email", "sfma@localhost"]);
+    gitCap(dir, ["config", "user.name", "Single File Micro Agent"]);
+  }
+
+  // The store must be its OWN repository. If it resolves to an enclosing
+  // repo, every add/commit lands there instead — and if that repo holds
+  // agent.mjs the agent would be writing its own source, which is exactly the
+  // code-mutation path SPEC §3 gates behind an observer that does not exist
+  // yet. Abort rather than degrade: this is a containment failure, not a
+  // capability question.
+  //
+  // Check the *git directory*, not the worktree root. A `.git` file
+  // (`gitdir: /elsewhere/.git`) makes --show-toplevel report this directory
+  // while objects and refs live in the other repository — the worktree root
+  // looks correct precisely when it is most wrong.
+  const ownGitDir = path.join(dir, ".git");
+  if (!fs.existsSync(ownGitDir) || !fs.statSync(ownGitDir).isDirectory()) {
+    throw new Error("memory store .sfma/mem/.git must be a real repository directory");
+  }
+  const dirOut = gitCap(dir, ["rev-parse", "--absolute-git-dir"]);
+  const gitDir = (dirOut.stdout || "").trim();
+  if (dirOut.status !== 0 || !gitDir) return unavailable("git rev-parse failed");
+  if (fs.realpathSync(gitDir) !== fs.realpathSync(ownGitDir)) {
+    throw new Error(`memory store writes into an enclosing repository: ${gitDir}`);
+  }
+  const top = (gitCap(dir, ["rev-parse", "--show-toplevel"]).stdout || "").trim();
+  if (!top || fs.realpathSync(top) !== fs.realpathSync(dir)) throw new Error(`memory store resolved into an enclosing repository: ${top}`);
+  if (fs.existsSync(path.join(top, "agent.mjs"))) throw new Error("memory store resolved into a repository containing agent.mjs");
+
+  // Live latency profile — measured every run, never trusted from a prior
+  // profile (SPEC §6: a store's profile is live, not a one-time guess).
+  const t0 = performance.now();
+  gitCap(dir, ["rev-parse", "--is-inside-work-tree"]);
+  const latencyMs = Math.round((performance.now() - t0) * 100) / 100;
+  const profile = {
+    name: "git-long", kind: "git", dir: path.relative(ws, dir), available: true, latencyMs,
+    // What the substrate can actually do — a capability, not an assumption.
+    // semantic is false: git grep is lexical, so semantic recall must degrade
+    // loudly rather than pretend (M2.6).
+    capabilities: { referential: true, episodic: true, lexical: true, changePoint: true, semantic: false },
+  };
+  trace.emit("store", 0, profile);
+  return { ...profile, dir };
+}
+
+function commitMemDelta(store, trace, message) {
+  if (!store) return null;
+  if (gitCap(store.dir, ["add", "-A"]).status !== 0) {
+    trace.emit("store", 0, { name: store.name, ok: false, stage: "add" });
+    return null;
+  }
+  const done = gitCap(store.dir, ["commit", "-q", "--allow-empty", "-m", message]);
+  if (done.status !== 0) {
+    trace.emit("store", 0, { name: store.name, ok: false, stage: "commit", reason: clip(done.stderr || "", 200) });
+    return null;
+  }
+  const sha = (gitCap(store.dir, ["rev-parse", "HEAD"]).stdout || "").trim();
+  trace.emit("store", 0, { name: store.name, ok: true, stage: "commit", sha, message });
+  return sha;
+}
+
 function outputPath(ws, p, outputs) {
   const abs = resolveIn(ws, p);
   const rel = path.relative(ws, abs);
@@ -443,6 +530,9 @@ async function main() {
   let memory = { version: 1, runs: [], pinned: null, endpoints: {} };
   try { memory = JSON.parse(fs.readFileSync(memPath, "utf8")); } catch {}
   state.stats = memory.endpoints || {};
+  // git-backed long tier (M2.2) — profiled fresh every run
+  const memStore = openMemStore(ws, trace);
+  memory.stores = { [memStore?.name ?? "git-long"]: memStore ?? { available: false } };
   const replay = memory.pinned?.genesisVersion === GENESIS_VERSION;
   let candidate = replay ? memory.pinned.candidate : null;
   trace.emit("lifecycle", 0, { from: null, to: replay ? "pinned-replay" : "probation" });
@@ -524,6 +614,13 @@ async function main() {
   }
   if (transition) trace.emit("lifecycle", 0, { from: replay ? "pinned-replay" : "probation", to: transition });
   fs.writeFileSync(memPath, JSON.stringify(memory, null, 2));
+  // one commit per run, matching the bounded-run-chain model: the memory
+  // delta becomes a DAG node that later runs can recall over (M2.4/M2.5)
+  if (memStore) {
+    fs.writeFileSync(path.join(memStore.dir, "memory.json"), JSON.stringify(memory, null, 2));
+    memory.lastCommit = commitMemDelta(memStore, trace, `run ${manifest.name} ${verdict} turns=${turns} calls=${state.calls}`);
+    fs.writeFileSync(memPath, JSON.stringify(memory, null, 2));
+  }
 
   trace.emit("lifecycle", 0, { from: replay ? "pinned-replay" : "probation", to: verdict });
   const lastAnchor = trace.anchor("system-wall");
@@ -531,7 +628,7 @@ async function main() {
   const record = {
     manifest, genesisVersion: GENESIS_VERSION,
     bootstrap: candidate, lifecycle: [replay ? "pinned-replay" : "probation", ...(transition ? [transition] : []), verdict],
-    memory: { runs: memory.runs.length, pinned: !!memory.pinned },
+    memory: { runs: memory.runs.length, pinned: !!memory.pinned, store: memStore ? { name: memStore.name, latencyMs: memStore.latencyMs, commit: memory.lastCommit ?? null } : null },
     outputs, criteria: (candidate?.successCriteria || []).map((c) => ({ criterion: c, pass: null, evidence: [] })),
     weights: state.stats, mutations: { count: 0, refs: [] },
     clock: { firstSeq, lastSeq: lastAnchor.seq, anchorSource: "system-wall (NTP re-anchor is post-M0)" },

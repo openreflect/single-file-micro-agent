@@ -32,7 +32,8 @@ commitment is signed).
 (`{from, to}` per §5.6 states), `clarification` (§5.5), `candidate` (bootstrap
 draft), `clock-anchor` (NTP result), `call` (model API request/response
 metadata: endpoint, class, latencyMs, ok), `message` (operator mailbox,
-`{dir: "in"|"out", kind?, text}` — §8).
+`{dir: "in"|"out", kind?, text}` — §8), `store` (memory store profile or
+commit: `{name, available, latencyMs?, capabilities?, sha?, reason?}` — §9).
 
 ## 2. Result record
 
