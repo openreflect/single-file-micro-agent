@@ -120,6 +120,41 @@ class M0Test(unittest.TestCase):
         fails = [v for v in self.verdicts() if not v["data"]["pass"]]
         self.assertIn("metacharacters", fails[0]["data"]["reason"])
 
+    def test_git_gate_refuses_network_and_escape_arguments(self):
+        cases = [
+            ("git push origin main", "subcommand not permitted"),
+            ("git fetch", "subcommand not permitted"),
+            ("git clone http://evil.example/repo", "subcommand not permitted"),
+            ("git remote add evil http://evil.example", "subcommand not permitted"),
+            ("git submodule update", "subcommand not permitted"),
+            ("git config core.pager sh", "subcommand not permitted"),
+            ("git -c core.pager=sh log", "global flags are not permitted"),
+            ("git --exec-path=/tmp/evil log", "global flags are not permitted"),
+            ("git --git-dir=/etc/git log", "global flags are not permitted"),
+            ("git --work-tree=/ log", "global flags are not permitted"),
+            ("git grep -Ovim pattern", "argument not permitted"),
+            ("git log --upload-pack=/tmp/evil", "argument not permitted"),
+            ("git", "requires a subcommand"),
+        ]
+        for cmd, expected in cases:
+            with self.subTest(cmd=cmd):
+                script = [CANDIDATE, {"tool": "run", "cmd": cmd},
+                          {"tool": "done", "summary": "tried"}]
+                self.run_agent(self.manifest(allowedCommands=["git"]), script, apply=False)
+                fails = [v for v in self.verdicts() if not v["data"]["pass"]]
+                self.assertTrue(fails, f"{cmd} was not refused")
+                self.assertIn(expected, fails[-1]["data"]["reason"])
+
+    def test_git_gate_permits_local_subcommands(self):
+        for cmd in ["git log --oneline -3", "git grep -c pattern", "git cat-file -p HEAD",
+                    "git rev-list --all", "git notes show", "git gc"]:
+            with self.subTest(cmd=cmd):
+                script = [CANDIDATE, {"tool": "run", "cmd": cmd},
+                          {"tool": "done", "summary": "ok"}]
+                self.run_agent(self.manifest(allowedCommands=["git"]), script, apply=False)
+                fails = [v for v in self.verdicts() if not v["data"]["pass"]]
+                self.assertEqual(fails, [], f"{cmd} was wrongly refused")
+
     def test_workspace_escape_refused(self):
         script = [CANDIDATE, {"tool": "write", "path": "../evil.txt", "content": "x"},
                   {"tool": "done", "summary": "tried"}]

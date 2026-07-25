@@ -153,6 +153,30 @@ function resolveIn(ws, p) {
   if (path.relative(fs.realpathSync(ws), fs.realpathSync(probe)).startsWith("..")) throw new Error(`escapes workspace via link: ${p}`);
   return abs;
 }
+// git is one allowlisted executable with an enormous surface — including
+// network egress and several argument-level paths to arbitrary execution.
+// allowedCommands gates executables, not subcommands, so gate git here
+// (M2.1). Pre-subcommand flags are refused wholesale: that position is where
+// -c, --exec-path, --config-env, --git-dir and --work-tree live, and refusing
+// all of them avoids guessing which globals are dangerous. Post-subcommand,
+// only the known execution vectors are refused, so ordinary flags whose
+// meaning is subcommand-specific (`git grep -c`) still work.
+const GIT_SUBCOMMANDS = ["init", "add", "commit", "cat-file", "rev-parse", "rev-list", "log", "grep", "show", "notes", "gc"];
+const GIT_DENIED_ARGS = ["--exec-path", "--upload-pack", "--receive-pack", "--open-files-in-pager", "--git-dir", "--work-tree"];
+
+function checkGit(argv) {
+  const rest = argv.slice(1);
+  if (!rest.length) throw new Error("git requires a subcommand");
+  if (rest[0].startsWith("-")) throw new Error(`git global flags are not permitted: ${rest[0]}`);
+  if (!GIT_SUBCOMMANDS.includes(rest[0])) throw new Error(`git subcommand not permitted: ${rest[0]}`);
+  for (const a of rest.slice(1)) {
+    if (a.startsWith("-O") || GIT_DENIED_ARGS.some((d) => a === d || a.startsWith(`${d}=`))) {
+      throw new Error(`git argument not permitted: ${a}`);
+    }
+  }
+  return argv;
+}
+
 function checkCmd(cmd, allowed) {
   if (/[;&|<>`$(){}\n\\]/.test(cmd)) throw new Error("shell metacharacters are not allowed");
   const argv = String(cmd).trim().split(/\s+/);
@@ -160,6 +184,7 @@ function checkCmd(cmd, allowed) {
   const executable = path.basename(argv[0]);
   if (!allowed.includes(executable)) throw new Error(`command not in allowedCommands: ${argv[0]}`);
   argv[0] = executable; // never honor a model-supplied executable path
+  if (executable === "git") checkGit(argv);
   return argv;
 }
 
