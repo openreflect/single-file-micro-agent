@@ -27,6 +27,14 @@ elif shutil.which("deno"):
 else:
     raise RuntimeError("neither node nor deno found on PATH")
 
+# Applied `run` requires unprivileged Linux namespaces and is fail-closed
+# without them (SECURITY.md). Hosts differ — GitHub runners restrict user
+# namespaces — so measure the capability and assert the behavior documented
+# for whichever environment this is, rather than assuming one of them.
+NAMESPACES = subprocess.run(
+    ["unshare", "--user", "--map-root-user", "--mount", "--net", "--pid", "--fork", "true"],
+    capture_output=True).returncode == 0
+
 CANDIDATE = {
     "mission": "Produce result.json in the workspace.",
     "successCriteria": ["result.json exists in the workspace"],
@@ -411,8 +419,16 @@ class M0Test(unittest.TestCase):
                   {"tool": "write", "path": "result.json", "content": "ok"},
                   {"tool": "done", "summary": "ok"}]
         r = self.run_agent(self.manifest(), script)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self.record()["hardTierFailures"], 0)
+        if NAMESPACES:
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(self.record()["hardTierFailures"], 0)
+        else:
+            # SECURITY.md: applied `run` is fail-closed without namespaces.
+            # Assert that documented behavior rather than skipping — the
+            # refusal path deserves a test of its own.
+            self.assertEqual(r.returncode, 1)
+            fails = [v for v in self.verdicts() if not v["data"]["pass"]]
+            self.assertIn("sandbox unavailable", fails[-1]["data"]["reason"])
 
     def test_allowed_interpreter_is_os_sandboxed(self):
         probe = """import json, os, pathlib, socket
@@ -433,6 +449,13 @@ pathlib.Path('result.json').write_text(json.dumps(result))
                   {"tool": "done", "summary": "ok"}]
         manifest = self.manifest(allowedCommands=["python3"], inputs=["probe.py", "input.txt"])
         r = self.run_agent(manifest, script, extra_env={"SFMA_TEST_SECRET": "must-not-leak"})
+        if not NAMESPACES:
+            # No namespaces means no isolation to verify — the runner must
+            # refuse rather than run the command unsandboxed.
+            self.assertEqual(r.returncode, 1)
+            self.assertFalse((self.ws / "result.json").exists(),
+                             "a refused command must not have executed")
+            return
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         data = json.loads((self.ws / "result.json").read_text())
         self.assertEqual(data, {"host_file_visible": False, "secret_visible": False,
