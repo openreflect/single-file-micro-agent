@@ -291,12 +291,23 @@ coordinate exclusively through traces left here.
   minimal metadata only — payloads never live there. Working memory stays fast
   because it holds pointers into richer stores, not the stores' contents; a
   payload written to the fast tier degrades the bus into a slow log.
-- **Three recall modes** for long-term memory, mirroring human recall:
+- **Four recall modes** for long-term memory. Three mirror human recall:
   **referential** (explicit IDs and links), **semantic** (similarity search,
-  where a store measurably supports it — a capability, not an assumption; absent
-  it, the agent degrades gracefully to the other two), and **episodic**
+  where a store measurably supports it — a capability, not an assumption;
+  absent it, the agent degrades loudly to lexical), and **episodic**
   (time-anchored recall over the monotonic ordering log of §4, which doubles as
-  the episodic index).
+  the episodic index). The fourth has no human analogue and was not designed
+  in advance — it exists because the substrate offered it: **change-point**
+  recall answers *when did this fact enter or leave memory, and in which run?*
+  This is a capability an agent that must explain itself should have, and the
+  spec grew to include it rather than leave it unused.
+- **Substrate.** Long-term memory is git. The object store is content-addressed
+  (referential), the commit DAG is time-ordered with causality (episodic),
+  `git grep` searches all history (lexical), and the pickaxe answers
+  change-point queries. A blob SHA *is* a pointer, so the reference-discipline
+  rule above becomes the natural shape of the data rather than a rule requiring
+  enforcement. Git is optional: absent it, the agent degrades to file-backed
+  memory and says so.
 
 ## 7. Observability — external by design
 

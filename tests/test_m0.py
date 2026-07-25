@@ -278,6 +278,23 @@ class M0Test(unittest.TestCase):
         self.assertTrue(hit["found"])
         self.assertGreater(hit["count"], 0, "marker committed by run A must be findable by run B")
 
+    def test_recall_change_point_reports_entry_and_run(self):
+        marker = "CHANGEPOINT-MARKER-2b9d"
+        cand = dict(CANDIDATE)
+        cand["mission"] = f"Produce result.json in the workspace. {marker}"
+        m = self.manifest()
+        self.run_agent(m, [cand, {"tool": "write", "path": "result.json", "content": "ok"},
+                           {"tool": "done", "summary": "ok"}])
+        r = self.run_agent(m, [CANDIDATE,
+                               {"tool": "recall", "mode": "change", "query": marker},
+                               {"tool": "write", "path": "result.json", "content": "ok"},
+                               {"tool": "done", "summary": "ok"}])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        hit = self.recalls()[-1]["data"]
+        self.assertEqual(hit["mode"], "change")
+        self.assertGreater(hit["count"], 0,
+                           "the run that introduced the marker must be identifiable")
+
     def test_recall_unknown_mode_refused(self):
         r = self.run_agent(self.manifest(), [CANDIDATE,
                                             {"tool": "recall", "mode": "telepathic"},

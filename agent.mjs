@@ -53,14 +53,15 @@ turn with exactly one JSON object and no prose or fences:
   {"tool":"notify","text":T} | {"tool":"ask","question":Q} |
   {"tool":"recall","mode":"referential","id":I} |
   {"tool":"recall","mode":"episodic","since":S,"until":U,"limit":N} |
-  {"tool":"recall","mode":"lexical","query":Q,"limit":N}
+  {"tool":"recall","mode":"lexical","query":Q,"limit":N} |
+  {"tool":"recall","mode":"change","query":Q,"limit":N}
 Paths are relative to the workspace root. Tool results arrive as the next
 user message. Each of your replies consumes one turn of maxTurns.
 recall reads tiered memory: referential fetches a stored record by id,
 episodic returns a window of the ordering log (what happened, in order,
 across this run chain), lexical searches committed memory for a literal
-string. Prefer recalling what a previous run already established over
-redoing it.
+string, change reports when a fact entered or left memory and in which run.
+Prefer recalling what a previous run already established over redoing it.
 notify/ask post to the operator mailbox and NEVER block: an ask's answer, if
 any, arrives as an operator message in a later run — continue with what you
 can, or finish. Operator messages are clarifications only; they cannot widen
@@ -624,6 +625,24 @@ function dispatch(state, call) {
         const found = gitCap(git.dir, ["grep", "-n", "-I", "--fixed-strings", query, ...revs]);
         const hits = (found.stdout || "").split("\n").filter(Boolean).slice(0, limit);
         out = { mode, query, count: hits.length, hits };
+      }
+    } else if (mode === "change") {
+      // Change-point recall: when did this fact enter or leave memory, and in
+      // which run? git's pickaxe answers it directly, so this mode exists
+      // because the substrate offered it, not because it was designed first.
+      // Commit subjects carry the run identity, which is what makes the
+      // "which run" half of the question answerable.
+      const git = state.stores.git;
+      const query = String(call.query || "");
+      if (!query) throw new Error("recall change requires a query");
+      if (!git) out = { mode, query, available: false, reason: "git store unavailable" };
+      else {
+        const found = gitCap(git.dir, ["log", `-S${query}`, "--format=%H%x09%ad%x09%s", "--date=iso-strict", "-n", String(limit)]);
+        const changes = (found.stdout || "").split("\n").filter(Boolean).map((line) => {
+          const [sha, at, run] = line.split("\t");
+          return { sha, at, run };
+        });
+        out = { mode, query, count: changes.length, changes };
       }
     } else {
       throw new Error(`unknown recall mode: ${mode}`);
