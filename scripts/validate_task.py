@@ -41,6 +41,7 @@ TUNING_KEYS = {
     "certCompletion": (0.0, 1.0),
     "certPass": (0.0, 1.0),
     "demotePass": (0.0, 1.0),
+    "fastTierMaxBytes": (1, 1_048_576),
     "routing": None,
 }
 ROUTING_WEIGHTS = {"wPrior", "wPass", "wAvail", "wLat"}

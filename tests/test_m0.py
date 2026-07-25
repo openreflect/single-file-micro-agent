@@ -181,6 +181,44 @@ class M0Test(unittest.TestCase):
                                cwd=memdir, capture_output=True, text=True)
         self.assertIn("memory.json", shown.stdout)
 
+    def test_tiers_are_placed_by_measured_latency(self):
+        script = [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
+                  {"tool": "done", "summary": "ok"}]
+        self.run_agent(self.manifest(), script)
+        placement = [t for t in self.traces()
+                     if t["kind"] == "store" and t["data"].get("op") == "placement"]
+        self.assertTrue(placement, "tier placement must be traced")
+        data = placement[0]["data"]
+        measured = data["measured"]
+        self.assertEqual([m["name"] for m in measured],
+                         [m["name"] for m in sorted(measured, key=lambda m: m["latencyMs"])],
+                         "stores must be ordered by measured latency")
+        self.assertEqual(data["placement"]["fast"], "inproc")
+        self.assertEqual(data["placement"]["long"], "git")
+        self.assertFalse(data["singleStore"])
+
+    def test_reference_discipline_keeps_payloads_out_of_the_fast_tier(self):
+        small = dict(CANDIDATE)
+        script = [small, {"tool": "write", "path": "result.json", "content": "ok"},
+                  {"tool": "done", "summary": "ok"}]
+        self.run_agent(self.manifest(tuning={"fastTierMaxBytes": 4096}), script)
+        puts = [t for t in self.traces() if t["kind"] == "store" and t["data"].get("op") == "put"]
+        self.assertTrue(puts)
+        self.assertEqual(puts[-1]["data"]["tier"], "fast",
+                         "a small record belongs in the fast tier")
+
+        big = dict(CANDIDATE)
+        big["mission"] = "x" * 5000
+        script = [big, {"tool": "write", "path": "result.json", "content": "ok"},
+                  {"tool": "done", "summary": "ok"}]
+        self.run_agent(self.manifest(tuning={"fastTierMaxBytes": 4096}), script)
+        puts = [t for t in self.traces() if t["kind"] == "store" and t["data"].get("op") == "put"]
+        last = puts[-1]["data"]
+        self.assertEqual(last["tier"], "long", "an oversized payload must be refused fast placement")
+        self.assertEqual(last["fastHolds"], "pointer")
+        self.assertTrue(last["ref"].startswith("git:"), f"pointer should be a blob SHA, got {last['ref']}")
+        self.assertIn("exceeds fastTierMaxBytes", last["reason"])
+
     def test_memory_store_symlink_refused(self):
         (self.ws / ".sfma").mkdir(parents=True, exist_ok=True)
         outside = self.dir / "outside"

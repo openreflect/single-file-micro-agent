@@ -259,6 +259,99 @@ function openMemStore(ws, trace) {
   return { ...profile, dir };
 }
 
+// Tier placement (SPEC §6): stores are placed by *measured* latency, never by
+// nominal type — "cache, filesystem and database are all just memory,
+// distinguished only by measured behavior."
+function openStores(ws, trace) {
+  const git = openMemStore(ws, trace);
+  const since = (t) => Math.round((performance.now() - t) * 1000) / 1000;
+  const list = [];
+
+  const map = new Map();
+  let t = performance.now();
+  map.set("__canary", "1"); map.get("__canary"); map.delete("__canary");
+  list.push({
+    name: "inproc", latencyMs: since(t),
+    put: (id, v) => { map.set(id, v); return `inproc:${id}`; },
+    get: (k) => (map.has(k) ? map.get(k) : null),
+  });
+
+  // Records live inside the git worktree when git is present, so they are
+  // carried by the per-run commit and become recallable history (M2.5).
+  const recDir = path.join(git ? git.dir : path.join(ws, ".sfma"), "records");
+  fs.mkdirSync(recDir, { recursive: true });
+  t = performance.now();
+  const canary = path.join(recDir, ".canary");
+  fs.writeFileSync(canary, "1"); fs.readFileSync(canary, "utf8"); fs.unlinkSync(canary);
+  list.push({
+    name: "file", latencyMs: since(t),
+    put: (id, v) => { fs.writeFileSync(path.join(recDir, id), v); return `file:${id}`; },
+    get: (k) => { try { return fs.readFileSync(path.join(recDir, k), "utf8"); } catch { return null; } },
+  });
+
+  if (git) {
+    t = performance.now();
+    gitCap(git.dir, ["rev-parse", "--is-inside-work-tree"]);
+    list.push({
+      name: "git", latencyMs: since(t),
+      // A blob SHA *is* the pointer — the reference-discipline rule stops
+      // needing enforcement here and becomes the natural shape of the data.
+      put: (_id, v) => {
+        const r = spawnSync("git", ["hash-object", "-w", "--stdin"], { cwd: git.dir, input: v, encoding: "utf8", timeout: 10000 });
+        return r.status === 0 ? `git:${(r.stdout || "").trim()}` : null;
+      },
+      get: (k) => { const r = gitCap(git.dir, ["cat-file", "-p", k]); return r.status === 0 ? r.stdout : null; },
+    });
+  }
+
+  list.sort((a, b) => a.latencyMs - b.latencyMs || a.name.localeCompare(b.name));
+  const tiers = { fast: list[0], medium: list[Math.min(1, list.length - 1)], long: list[list.length - 1] };
+  trace.emit("store", 0, {
+    op: "placement",
+    placement: Object.fromEntries(Object.entries(tiers).map(([k, v]) => [k, v.name])),
+    measured: list.map((s) => ({ name: s.name, latencyMs: s.latencyMs })),
+    singleStore: list.length === 1,
+  });
+  return { list, tiers, git };
+}
+
+const resolveRef = (stores, ref) => {
+  const cut = String(ref).indexOf(":");
+  const store = stores.list.find((s) => s.name === String(ref).slice(0, cut));
+  return store ? store.get(String(ref).slice(cut + 1)) : null;
+};
+
+// SPEC §6 binding rule, enforced in code: the fast tier carries references and
+// minimal metadata only. A payload over the cap is refused there and written
+// to the long tier, with only the pointer kept fast — a payload in the fast
+// tier degrades the bus into a slow log.
+function memPut(stores, id, payload, trace, maxBytes = 512) {
+  const value = typeof payload === "string" ? payload : JSON.stringify(payload);
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes <= maxBytes) {
+    const ref = stores.tiers.fast.put(id, value);
+    trace.emit("store", 0, { op: "put", id, bytes, tier: "fast", ref });
+    return ref;
+  }
+  const ref = stores.tiers.long.put(id, value);
+  stores.tiers.fast.put(id, JSON.stringify({ ptr: ref }));
+  trace.emit("store", 0, {
+    op: "put", id, bytes, tier: "long", ref, fastHolds: "pointer",
+    reason: `payload ${bytes}B exceeds fastTierMaxBytes ${maxBytes}`,
+  });
+  return ref;
+}
+
+function memGet(stores, id) {
+  const hit = stores.tiers.fast.get(id);
+  if (hit === null || hit === undefined) return null;
+  try {
+    const parsed = JSON.parse(hit);
+    if (parsed && typeof parsed === "object" && parsed.ptr) return resolveRef(stores, parsed.ptr);
+  } catch { /* not a pointer envelope */ }
+  return hit;
+}
+
 function commitMemDelta(store, trace, message) {
   if (!store) return null;
   if (gitCap(store.dir, ["add", "-A"]).status !== 0) {
@@ -530,9 +623,15 @@ async function main() {
   let memory = { version: 1, runs: [], pinned: null, endpoints: {} };
   try { memory = JSON.parse(fs.readFileSync(memPath, "utf8")); } catch {}
   state.stats = memory.endpoints || {};
-  // git-backed long tier (M2.2) — profiled fresh every run
-  const memStore = openMemStore(ws, trace);
-  memory.stores = { [memStore?.name ?? "git-long"]: memStore ?? { available: false } };
+  // tiered memory (M2.2/M2.3) — every store profiled fresh, placed by
+  // measured latency rather than nominal type
+  const stores = openStores(ws, trace);
+  const memStore = stores.git;
+  memory.stores = {
+    placement: Object.fromEntries(Object.entries(stores.tiers).map(([k, v]) => [k, v.name])),
+    measured: stores.list.map((s) => ({ name: s.name, latencyMs: s.latencyMs })),
+    git: memStore ? { latencyMs: memStore.latencyMs, capabilities: memStore.capabilities } : { available: false },
+  };
   const replay = memory.pinned?.genesisVersion === GENESIS_VERSION;
   let candidate = replay ? memory.pinned.candidate : null;
   trace.emit("lifecycle", 0, { from: null, to: replay ? "pinned-replay" : "probation" });
@@ -613,6 +712,11 @@ async function main() {
     transition = "certified";
   }
   if (transition) trace.emit("lifecycle", 0, { from: replay ? "pinned-replay" : "probation", to: transition });
+  // The emergent configuration is the run's most recallable artifact, so it
+  // goes through the tiered write path — which also exercises the binding
+  // reference-discipline rule on every real run, not only in tests.
+  if (candidate) memPut(stores, `candidate-${firstSeq}`, candidate, trace, (manifest.tuning || {}).fastTierMaxBytes ?? 512);
+
   fs.writeFileSync(memPath, JSON.stringify(memory, null, 2));
   // one commit per run, matching the bounded-run-chain model: the memory
   // delta becomes a DAG node that later runs can recall over (M2.4/M2.5)
