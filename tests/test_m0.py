@@ -204,8 +204,12 @@ class M0Test(unittest.TestCase):
         self.run_agent(self.manifest(tuning={"fastTierMaxBytes": 4096}), script)
         puts = [t for t in self.traces() if t["kind"] == "store" and t["data"].get("op") == "put"]
         self.assertTrue(puts)
-        self.assertEqual(puts[-1]["data"]["tier"], "fast",
-                         "a small record belongs in the fast tier")
+        # The payload lives in a durable tier and the fast tier holds only the
+        # reference — never the payload (SPEC §6). A payload cached fast would
+        # also not survive the run boundary, since that tier is in-process.
+        self.assertEqual(puts[-1]["data"]["tier"], "medium",
+                         "an ordinary record's durable home is the medium tier")
+        self.assertEqual(puts[-1]["data"]["fastHolds"], "pointer")
 
         big = dict(CANDIDATE)
         big["mission"] = "x" * 5000
@@ -218,6 +222,69 @@ class M0Test(unittest.TestCase):
         self.assertEqual(last["fastHolds"], "pointer")
         self.assertTrue(last["ref"].startswith("git:"), f"pointer should be a blob SHA, got {last['ref']}")
         self.assertIn("exceeds fastTierMaxBytes", last["reason"])
+
+    def recalls(self):
+        return [t for t in self.traces()
+                if t["kind"] == "store" and t["data"].get("op") == "recall"]
+
+    def test_recall_referential_spans_runs(self):
+        marker = "MEMORY-MARKER-8f3a"
+        cand = dict(CANDIDATE)
+        cand["mission"] = f"Produce result.json in the workspace. {marker}"
+        m = self.manifest()
+        self.run_agent(m, [cand, {"tool": "write", "path": "result.json", "content": "ok"},
+                           {"tool": "done", "summary": "ok"}])
+        puts = [t for t in self.traces() if t["kind"] == "store" and t["data"].get("op") == "put"]
+        record_id = puts[-1]["data"]["id"]
+
+        r = self.run_agent(m, [CANDIDATE,
+                               {"tool": "recall", "mode": "referential", "id": record_id},
+                               {"tool": "write", "path": "result.json", "content": "ok"},
+                               {"tool": "done", "summary": "ok"}])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        hit = self.recalls()[-1]["data"]
+        self.assertTrue(hit["found"], "run B must recall the record run A wrote")
+        # In-process memory died with run A, so this can only have come from a
+        # durable tier — that is the cross-run persistence proof.
+        self.assertIn(hit["tier"], ("medium", "long"))
+
+    def test_recall_episodic_reads_the_ordering_log(self):
+        m = self.manifest()
+        self.run_agent(m, [CANDIDATE, {"tool": "write", "path": "result.json", "content": "ok"},
+                           {"tool": "done", "summary": "ok"}])
+        r = self.run_agent(m, [CANDIDATE,
+                               {"tool": "recall", "mode": "episodic", "limit": 5},
+                               {"tool": "write", "path": "result.json", "content": "ok"},
+                               {"tool": "done", "summary": "ok"}])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        hit = self.recalls()[-1]["data"]
+        self.assertEqual(hit["mode"], "episodic")
+        self.assertGreater(hit["count"], 0)
+        self.assertLessEqual(hit["count"], 5, "limit must cap the window")
+
+    def test_recall_lexical_searches_committed_memory(self):
+        marker = "LEXICAL-MARKER-51c7"
+        cand = dict(CANDIDATE)
+        cand["mission"] = f"Produce result.json in the workspace. {marker}"
+        m = self.manifest()
+        self.run_agent(m, [cand, {"tool": "write", "path": "result.json", "content": "ok"},
+                           {"tool": "done", "summary": "ok"}])
+        r = self.run_agent(m, [CANDIDATE,
+                               {"tool": "recall", "mode": "lexical", "query": marker},
+                               {"tool": "write", "path": "result.json", "content": "ok"},
+                               {"tool": "done", "summary": "ok"}])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        hit = self.recalls()[-1]["data"]
+        self.assertTrue(hit["found"])
+        self.assertGreater(hit["count"], 0, "marker committed by run A must be findable by run B")
+
+    def test_recall_unknown_mode_refused(self):
+        r = self.run_agent(self.manifest(), [CANDIDATE,
+                                            {"tool": "recall", "mode": "telepathic"},
+                                            {"tool": "done", "summary": "tried"}])
+        self.assertEqual(r.returncode, 1)
+        fails = [v for v in self.verdicts() if not v["data"]["pass"]]
+        self.assertIn("unknown recall mode", fails[-1]["data"]["reason"])
 
     def test_memory_store_symlink_refused(self):
         (self.ws / ".sfma").mkdir(parents=True, exist_ok=True)

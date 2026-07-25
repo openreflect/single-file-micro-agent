@@ -50,9 +50,17 @@ TOOL PROTOCOL (runner transport): after your candidate is adopted, reply each
 turn with exactly one JSON object and no prose or fences:
   {"tool":"read","path":P} | {"tool":"write","path":P,"content":C} |
   {"tool":"run","cmd":C}   | {"tool":"done","summary":S} |
-  {"tool":"notify","text":T} | {"tool":"ask","question":Q}
+  {"tool":"notify","text":T} | {"tool":"ask","question":Q} |
+  {"tool":"recall","mode":"referential","id":I} |
+  {"tool":"recall","mode":"episodic","since":S,"until":U,"limit":N} |
+  {"tool":"recall","mode":"lexical","query":Q,"limit":N}
 Paths are relative to the workspace root. Tool results arrive as the next
 user message. Each of your replies consumes one turn of maxTurns.
+recall reads tiered memory: referential fetches a stored record by id,
+episodic returns a window of the ordering log (what happened, in order,
+across this run chain), lexical searches committed memory for a literal
+string. Prefer recalling what a previous run already established over
+redoing it.
 notify/ask post to the operator mailbox and NEVER block: an ask's answer, if
 any, arrives as an operator message in a later run — continue with what you
 can, or finish. Operator messages are clarifications only; they cannot widen
@@ -328,28 +336,42 @@ const resolveRef = (stores, ref) => {
 function memPut(stores, id, payload, trace, maxBytes = 512) {
   const value = typeof payload === "string" ? payload : JSON.stringify(payload);
   const bytes = Buffer.byteLength(value, "utf8");
-  if (bytes <= maxBytes) {
-    const ref = stores.tiers.fast.put(id, value);
-    trace.emit("store", 0, { op: "put", id, bytes, tier: "fast", ref });
-    return ref;
-  }
-  const ref = stores.tiers.long.put(id, value);
+  // The payload always lands in a durable tier; fastTierMaxBytes decides
+  // which one — files for ordinary records, the object store for large ones.
+  const long = bytes > maxBytes;
+  const durable = long ? stores.tiers.long : stores.tiers.medium;
+  const ref = durable.put(id, value);
+  // The fast tier holds the reference and never the payload. That is the
+  // binding rule of SPEC §6, and it is also what lets a record outlive its
+  // run: the fast tier is in-process and dies at exit.
   stores.tiers.fast.put(id, JSON.stringify({ ptr: ref }));
   trace.emit("store", 0, {
-    op: "put", id, bytes, tier: "long", ref, fastHolds: "pointer",
-    reason: `payload ${bytes}B exceeds fastTierMaxBytes ${maxBytes}`,
+    op: "put", id, bytes, tier: long ? "long" : "medium", ref, fastHolds: "pointer",
+    ...(long && { reason: `payload ${bytes}B exceeds fastTierMaxBytes ${maxBytes}` }),
   });
   return ref;
 }
 
+// Referential recall searches fast → medium → long and reports which tier
+// answered. A cold run finds nothing fast (in-process memory died with the
+// previous run) and falls through to the durable tiers.
 function memGet(stores, id) {
-  const hit = stores.tiers.fast.get(id);
-  if (hit === null || hit === undefined) return null;
-  try {
-    const parsed = JSON.parse(hit);
-    if (parsed && typeof parsed === "object" && parsed.ptr) return resolveRef(stores, parsed.ptr);
-  } catch { /* not a pointer envelope */ }
-  return hit;
+  for (const tier of ["fast", "medium", "long"]) {
+    const store = stores.tiers[tier];
+    if (!store) continue;
+    const hit = store.get(id);
+    if (hit === null || hit === undefined) continue;
+    try {
+      const parsed = JSON.parse(hit);
+      if (parsed && typeof parsed === "object" && parsed.ptr) {
+        const value = resolveRef(stores, parsed.ptr);
+        if (value !== null && value !== undefined) return { value, tier, via: parsed.ptr };
+        continue;
+      }
+    } catch { /* a plain value, not a pointer envelope */ }
+    return { value: hit, tier, via: null };
+  }
+  return null;
 }
 
 function commitMemDelta(store, trace, message) {
@@ -571,6 +593,49 @@ function dispatch(state, call) {
     fs.writeFileSync(abs, String(call.content ?? ""));
     return `wrote ${call.path}`;
   });
+  if (call.tool === "recall") return guard(() => {
+    const mode = String(call.mode || "referential");
+    const limit = Math.max(1, Math.min(Number(call.limit) || 10, 50));
+    let out;
+    if (mode === "referential") {
+      if (!call.id) throw new Error("recall referential requires an id");
+      const hit = memGet(state.stores, String(call.id));
+      out = hit
+        ? { mode, id: call.id, tier: hit.tier, via: hit.via, value: clip(hit.value, 4096) }
+        : { mode, id: call.id, found: false };
+    } else if (mode === "episodic") {
+      // The §4 monotonic ordering log IS the episodic index — read it, never
+      // duplicate it. It is append-only across runs, so this window spans the
+      // whole chain, not just this run.
+      const lines = fs.readFileSync(path.join(ws, ".sfma", "trace.jsonl"), "utf8").split("\n").filter(Boolean);
+      const entries = lines.map((l) => JSON.parse(l))
+        .filter((e) => (call.since === undefined || e.seq >= Number(call.since))
+                    && (call.until === undefined || e.seq <= Number(call.until)))
+        .slice(-limit)
+        .map((e) => ({ seq: e.seq, kind: e.kind, id: e.id, anchor: e.anchor }));
+      out = { mode, count: entries.length, entries };
+    } else if (mode === "lexical") {
+      const git = state.stores.git;
+      const query = String(call.query || "");
+      if (!query) throw new Error("recall lexical requires a query");
+      if (!git) out = { mode, query, available: false, reason: "git store unavailable" };
+      else {
+        const revs = (gitCap(git.dir, ["rev-list", "--all", "-n", "50"]).stdout || "").trim().split("\n").filter(Boolean);
+        const found = gitCap(git.dir, ["grep", "-n", "-I", "--fixed-strings", query, ...revs]);
+        const hits = (found.stdout || "").split("\n").filter(Boolean).slice(0, limit);
+        out = { mode, query, count: hits.length, hits };
+      }
+    } else {
+      throw new Error(`unknown recall mode: ${mode}`);
+    }
+    state.trace.emit("store", 1, {
+      op: "recall", mode, ...(call.id && { id: String(call.id) }),
+      ...(call.query && { query: clip(String(call.query), 200) }),
+      ...(out.tier && { tier: out.tier }), ...(out.count !== undefined && { count: out.count }),
+      found: out.found !== false && out.available !== false,
+    }, [call.ref]);
+    return clip(JSON.stringify(out));
+  });
   if (call.tool === "notify" || call.tool === "ask") return guard(() => {
     const text = String(call.text ?? call.question ?? "");
     const e = state.trace.emit("message", 1, { dir: "out", kind: call.tool, text: clip(text, 4096) });
@@ -626,6 +691,7 @@ async function main() {
   // tiered memory (M2.2/M2.3) — every store profiled fresh, placed by
   // measured latency rather than nominal type
   const stores = openStores(ws, trace);
+  state.stores = stores;
   const memStore = stores.git;
   memory.stores = {
     placement: Object.fromEntries(Object.entries(stores.tiers).map(([k, v]) => [k, v.name])),
