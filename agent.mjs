@@ -311,7 +311,14 @@ function openStores(ws, trace) {
       name: "git", latencyMs: since(t),
       // A blob SHA *is* the pointer — the reference-discipline rule stops
       // needing enforcement here and becomes the natural shape of the data.
-      put: (_id, v) => {
+      //
+      // The record is also materialized in the worktree so the per-run commit
+      // references the blob. `hash-object -w` alone writes a DANGLING object:
+      // resolvable by SHA, but invisible to grep and the pickaxe over
+      // revisions, and eventually garbage-collected. Content addressing means
+      // both paths agree on the same SHA.
+      put: (id, v) => {
+        fs.writeFileSync(path.join(recDir, id), v);
         const r = spawnSync("git", ["hash-object", "-w", "--stdin"], { cwd: git.dir, input: v, encoding: "utf8", timeout: 10000 });
         return r.status === 0 ? `git:${(r.stdout || "").trim()}` : null;
       },

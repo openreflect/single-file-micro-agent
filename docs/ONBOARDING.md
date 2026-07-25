@@ -129,7 +129,29 @@ the mailbox to a Telegram bot. One-time setup: message @BotFather → `/newbot`
 `TELEGRAM_CHAT_ID`, message your bot, and it prints your chat id → export it
 and rerun. Only that chat is relayed; everyone else is ignored and logged.
 
-## 5. Where things land
+## 5. What it remembers
+
+Memory is git-backed and lives entirely inside the workspace at `.sfma/mem`,
+receiving one commit per run. Nothing else is required of you — if git is on
+the host it is used, and if it is not, the agent falls back to file-backed
+memory and records that it did.
+
+During a run the agent can recall with `{"tool":"recall","mode":...}`:
+`referential` by record id, `episodic` for a window of what happened in order
+across the whole run chain, `lexical` to search committed memory, and `change`
+to ask *when did this fact enter memory, and in which run?* A `semantic` mode
+exists but no store currently measures as similarity-capable, so it returns a
+clearly-labelled lexical ranking flagged `degraded: true` rather than
+pretending.
+
+Inspect memory yourself with ordinary git — it is a normal repository:
+
+```bash
+git -C <workspace>/.sfma/mem log --oneline        # what each run learned
+git -C <workspace>/.sfma/mem log -S "some fact"   # when that fact appeared
+```
+
+## 6. Where things land
 
 Every run writes, inside the workspace only:
 

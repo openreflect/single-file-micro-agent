@@ -20,6 +20,13 @@ listed as enforced when the named mechanism and an adversarial test both exist.
 | A result is bound to the exact manifest, trace head/count, and result body | `.sfma/result.json` carries canonical SHA-256 commitments | `test_trace_is_ordered_and_anchored`, `scripts/verify_audit.mjs` |
 | A third party can authenticate an audit produced by a configured operator key | optional Ed25519 signature over the integrity commitments, verified against an externally trusted public key | `test_ed25519_signed_audit_verifies`, `scripts/verify_audit.mjs` |
 
+Git is an **optional** prerequisite, for memory only. With git present the
+long tier is a repository at `.sfma/mem` receiving one commit per run; without
+it the runner reports the store unavailable in the trace and continues on
+file-backed memory, so a missing git degrades capability and never fails a
+run. Git is only ever *executed* on the model's behalf when the manifest
+allowlists it, and then only through the subcommand gate above.
+
 Secure command execution is fail-closed. It currently requires Linux with
 working unprivileged user, mount, PID, and network namespaces plus the standard
 `unshare`, `mount`, and `chroot` utilities. A host without those facilities can

@@ -96,13 +96,15 @@ single-file-micro-agent
 │   └── Endpoint weight grid (§5.7)
 │       ├── ≥3 LLM API endpoints, self-determined weights
 │       └── Trace-to-weight: benchmark priors + measured latency/availability/pass-fail
-├── Memory & communication (§6)                       [M0.5: cross-run memory shipped]
+├── Memory & communication (§6)                       [M2: git-backed memory shipped]
 │   ├── Cross-run memory — recall + pinning (.sfma/memory.json)
 │   ├── Operator mailbox — inbox/outbox chat (§5.5)   [shipped: notify/ask]
-│   ├── Blackboard medium — the only inter-loop channel
-│   ├── Tiers placed by measured latency (short / medium / long)
-│   ├── Reference discipline (fast tier = pointers only)
-│   └── Recall modes: referential · semantic · episodic
+│   ├── Git substrate — one commit per run (.sfma/mem) [shipped: M2.2]
+│   ├── Tiers placed by measured latency               [shipped: M2.3]
+│   ├── Reference discipline (fast tier = pointers only) [shipped: enforced in code]
+│   ├── Recall: referential · episodic · lexical · change [shipped: M2.4/M2.5]
+│   ├── Semantic — degrades loudly, no store claims it [shipped: M2.6]
+│   └── Blackboard medium — the only inter-loop channel [M1+]
 ├── Clocking (§4)                                     [M0: monotonic log shipped; NTP pending]
 │   ├── Monotonic ordering log (doubles as episodic index)
 │   └── Scheduled NTP re-anchor
@@ -180,6 +182,17 @@ Every run writes `.sfma/trace.jsonl` (append-only event log) and
 `.sfma/result.json` (the result record) inside the workspace, and maintains
 `.sfma/memory.json` — cross-run memory that certifies and pins proven
 configurations over repeated runs.
+
+Memory is **git-backed** (`.sfma/mem`, one commit per run), because git
+already is what SPEC §6 describes: content-addressed objects give
+referential recall, the commit DAG gives episodic recall with real causality,
+`git grep` searches all history, and the pickaxe answers *when did this fact
+enter memory, and in which run?* A blob SHA is already a pointer, so the
+fast-tier reference rule is the shape of the data rather than a rule needing
+enforcement. Stores are placed into tiers by measured latency each run, and
+no store claims semantic similarity it cannot do — `semantic` recall degrades
+loudly to a labelled lexical ranking. Git is optional: without it the agent
+falls back to file-backed memory and says so.
 
 Verify the trace/result commitments (and Ed25519 signature when configured):
 

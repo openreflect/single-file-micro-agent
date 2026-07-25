@@ -212,6 +212,48 @@ re-emerge from probation on the next run. Dry runs are recorded but excluded
 from certification statistics. Every transition is a `lifecycle` trace and
 appears in the result record.
 
+### 7.1 Tiered stores (SPEC §6)
+
+Three stores are profiled at the start of **every** run — a live profile, not
+a value trusted from a previous run — and placed into tiers by **measured
+latency**, never by nominal type. Placement is a sort with a deterministic
+tie-break by name; a host offering only one usable store fills all three tiers
+and traces that it did.
+
+| Store | Typical tier | Durable? | Capabilities |
+|---|---|---|---|
+| `inproc` | fast | no — dies at run exit | referential |
+| `file` (`.sfma/mem/records/`) | medium | yes | referential |
+| `git` (`.sfma/mem`) | long | yes | referential, episodic, lexical, changePoint |
+
+**No store declares `semantic: true`** — git grep is lexical. That is a
+measured capability, not an oversight; see the degradation rule below.
+
+**Reference discipline (binding).** A record's payload always lands in a
+durable tier: `file` ordinarily, the git object store when it exceeds
+`tuning.fastTierMaxBytes` (default **512**). The fast tier holds the pointer
+and never the payload — which is both the SPEC §6 rule and what lets a record
+outlive its run, since the fast tier is in-process. Where the long tier is
+git, the pointer is a blob SHA.
+
+### 7.2 Recall modes
+
+The `recall` tool takes `mode` and returns capped, clipped, traced results.
+
+| Mode | Arguments | Backed by |
+|---|---|---|
+| `referential` | `id` | tier search fast → medium → long; reports which tier answered |
+| `episodic` | `since`, `until`, `limit` | the §4 monotonic ordering log, read directly — it *is* the index, and it is append-only across runs, so a window spans the whole chain |
+| `lexical` | `query`, `limit` | `git grep` over committed history |
+| `change` | `query`, `limit` | `git log -S` (pickaxe): when a fact entered or left memory, and — via the run identity in each commit subject — in which run |
+| `semantic` | `query`, `limit` | only a store measuring as similarity-capable |
+
+**Degradation is loud.** With no similarity-capable store, `semantic` returns
+a lexical term-overlap ranking carrying `degraded: true` and a plain-language
+notice that it is not semantic similarity; the same flag appears in the trace,
+and the genesis prompt instructs the agent not to report such a result as
+similarity. An unknown mode is a hard-tier refusal, not an empty result.
+
 ## 8. Operator mailbox (SPEC §5.5)
 
 Two folders inside the workspace — the engine's only communication surface:

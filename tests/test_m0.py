@@ -325,6 +325,28 @@ class M0Test(unittest.TestCase):
             self.assertFalse(p["capabilities"]["semantic"],
                              f"{p.get('name')} must not claim similarity search it cannot do")
 
+    def test_long_tier_records_are_committed_and_searchable(self):
+        # Regression: a record routed to the git tier was stored with
+        # `hash-object -w`, which writes a DANGLING blob — resolvable by SHA
+        # but invisible to grep/pickaxe over revisions and gc-eligible. Only
+        # oversized records took that path, so smaller-record tests missed it.
+        marker = "LONGTIER-MARKER-9c02"
+        cand = dict(CANDIDATE)
+        cand["mission"] = f"{marker} " + "padding " * 200
+        m = self.manifest()
+        self.run_agent(m, [cand, {"tool": "write", "path": "result.json", "content": "ok"},
+                           {"tool": "done", "summary": "ok"}])
+        puts = [t for t in self.traces() if t["kind"] == "store" and t["data"].get("op") == "put"]
+        self.assertEqual(puts[-1]["data"]["tier"], "long", "record must be large enough to route long")
+
+        r = self.run_agent(m, [CANDIDATE,
+                               {"tool": "recall", "mode": "lexical", "query": marker},
+                               {"tool": "write", "path": "result.json", "content": "ok"},
+                               {"tool": "done", "summary": "ok"}])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertGreater(self.recalls()[-1]["data"]["count"], 0,
+                           "a long-tier record must be referenced by a commit, not dangling")
+
     def test_recall_unknown_mode_refused(self):
         r = self.run_agent(self.manifest(), [CANDIDATE,
                                             {"tool": "recall", "mode": "telepathic"},
